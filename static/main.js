@@ -277,6 +277,23 @@ function createOverlay(highlight) {
     return div
 }
 
+function sortTextLayerByVisualPosition(textLayer) {
+    window.__sortTextLayerRan = true
+    const spans = Array.from(textLayer.querySelectorAll('span'))
+    spans.sort((a, b) => {
+        const rectA = a.getBoundingClientRect()
+        const rectB = b.getBoundingClientRect()
+        const topDiff = rectA.top - rectB.top
+        if (Math.abs(topDiff) > 3) {
+            return topDiff
+        }
+        return rectA.left - rectB.left
+    })
+
+    spans.forEach((span) => textLayer.appendChild(span))
+    Array.from(textLayer.querySelectorAll('br')).forEach((br) => br.remove())
+}
+
 async function initViewerPage() {
     if (typeof window.PAPER_ID !== "number") return
 
@@ -316,45 +333,50 @@ async function initViewerPage() {
         textLayer.innerHTML = ""
 
         const textContent = await page.getTextContent()
-        if (typeof pdfjsLib.renderTextLayer === 'function') {
-            const textDivs = []
-            const textLayerRenderTask = pdfjsLib.renderTextLayer({
-                textContent,
-                container: textLayer,
-                viewport,
-                textDivs,
-                enhanceTextSelection: true,
-            })
-            await textLayerRenderTask.promise
-        } else {
-            textContent.items.forEach((item) => {
-                const wrapper = document.createElement("span")
-                const span = document.createElement("span")
-                span.textContent = item.str
+        const items = textContent.items.map((item) => {
+            const tm = pdfjsLib.Util.transform(viewport.transform, item.transform)
+            return {
+                item,
+                tm,
+                top: tm[5],
+                left: tm[4],
+            }
+        })
 
-                const tm = pdfjsLib.Util.transform(viewport.transform, item.transform)
+        items.sort((a, b) => {
+            const topDiff = a.top - b.top
+            if (Math.abs(topDiff) > 5) {
+                return topDiff
+            }
+            return a.left - b.left
+        })
 
-                wrapper.style.position = 'absolute'
-                wrapper.style.left = '0px'
-                wrapper.style.top = '0px'
-                wrapper.style.transform = `matrix(${tm[0].toFixed(6)}, ${tm[1].toFixed(6)}, ${tm[2].toFixed(6)}, ${tm[3].toFixed(6)}, ${tm[4].toFixed(2)}, ${tm[5].toFixed(2)})`
-                wrapper.style.transformOrigin = '0 0'
-                wrapper.style.pointerEvents = 'auto'
-                wrapper.className = 'text-item-wrapper'
+        items.forEach(({ item, tm }) => {
+            const span = document.createElement("span")
+            span.textContent = item.str
 
-                span.style.display = 'inline-block'
-                span.style.color = 'transparent'
-                span.style.fontSize = '1px'
-                span.style.lineHeight = '1'
-                span.style.whiteSpace = 'pre'
-                span.style.transform = 'scaleY(-1)'
-                span.style.transformOrigin = '0 0'
-                span.className = 'text-item'
+            span.style.display = 'inline-block'
+            span.style.color = 'transparent'
+            span.style.opacity = '1'
+            span.style.textShadow = 'none'
+            span.style.fontSize = '0.5px'
+            span.style.lineHeight = '1'
+            span.style.whiteSpace = 'pre'
+            span.style.position = 'absolute'
+            span.style.left = '0px'
+            span.style.top = '0px'
+            span.style.transform = `matrix(${tm[0].toFixed(6)}, ${tm[1].toFixed(6)}, ${tm[2].toFixed(6)}, ${tm[3].toFixed(6)}, ${tm[4].toFixed(2)}, ${tm[5].toFixed(2)}) scaleY(-1)`
+            span.style.transformOrigin = '0 0'
+            span.style.pointerEvents = 'auto'
+            span.style.userSelect = 'text'
+            span.style.cursor = 'text'
+            span.style.margin = '0'
+            span.style.padding = '0'
+            span.style.border = 'none'
+            span.className = 'text-item'
 
-                wrapper.appendChild(span)
-                textLayer.appendChild(wrapper)
-            })
-        }
+            textLayer.appendChild(span)
+        })
 
         pageInfo.textContent = `Page ${pageNumber} / ${pdfDoc.numPages}`
         loader.classList.add("hidden")
@@ -368,6 +390,37 @@ async function initViewerPage() {
             if (highlight.page_number !== currentPage) return
             highlightLayer.appendChild(createOverlay(highlight))
         })
+    }
+
+    const extractSelectedText = () => {
+        const selection = window.getSelection()
+        if (!selection || selection.rangeCount === 0) {
+            return ""
+        }
+        const range = selection.getRangeAt(0)
+        const rects = Array.from(range.getClientRects())
+        if (!rects.length) {
+            return selection.toString().trim()
+        }
+
+        const spans = Array.from(textLayer.querySelectorAll('span'))
+            .filter((span) => {
+                const rect = span.getBoundingClientRect()
+                return rects.some((r) =>
+                    rect.left < r.right && r.left < rect.right && rect.top < r.bottom && r.top < rect.bottom
+                )
+            })
+            .sort((a, b) => {
+                const rectA = a.getBoundingClientRect()
+                const rectB = b.getBoundingClientRect()
+                const topDiff = rectA.top - rectB.top
+                if (Math.abs(topDiff) > 3) {
+                    return topDiff
+                }
+                return rectA.left - rectB.left
+            })
+        const text = spans.map((span) => span.textContent).join("").trim()
+        return text || selection.toString().trim()
     }
 
     const captureSelection = () => {
@@ -388,14 +441,13 @@ async function initViewerPage() {
             y: (rect.top - containerRect.top) / containerRect.height,
             width: rect.width / containerRect.width,
             height: rect.height / containerRect.height,
-            selected_text: selection.toString().trim(),
+            selected_text: extractSelectedText(),
             page_number: currentPage,
             color: "rgba(253, 230, 138, 0.45)",
         }
     }
 
     saveButton.addEventListener("click", async () => {
-        captureSelection()
         if (!selectedBox || !selectedBox.selected_text) {
             showStatus("Select text before saving a highlight.", "error")
             return
