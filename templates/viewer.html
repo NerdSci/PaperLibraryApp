@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Viewer - {{ paper.title }}</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="viewer-shell">
+    <header class="viewer-header">
+      <div>
+        <p class="meta-label">Viewing</p>
+        <h1>{{ paper.title }}</h1>
+        <p class="meta-text">{{ paper.authors }} · {{ paper.year }} · [{{ paper.category }}]</p>
+      </div>
+      <div class="viewer-actions">
+        <a class="secondary-button" href="/">← Back to library</a>
+      </div>
+    </header>
+
+    <section class="viewer-controls">
+      <button id="prev-page" class="secondary-button">Previous</button>
+      <span id="page-info">Page 1</span>
+      <button id="next-page" class="secondary-button">Next</button>
+      <button id="save-highlight" class="primary-button">Save Highlight</button>
+      <span class="hint">Select text in the viewer to capture a highlight.</span>
+    </section>
+
+    <div id="pdf-viewer" class="pdf-viewer">
+      <div id="viewer-loader">Loading PDF…</div>
+      <div id="pdf-container" class="pdf-container">
+        <canvas id="pdf-canvas"></canvas>
+        <div id="text-layer" class="text-layer"></div>
+        <div id="highlight-layer" class="highlight-layer"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.min.js"></script>
+  <script src="/static/main.js"></script>
+  <script>
+    window.PAPER_ID = {{ paper.id }};
+  </script>
+</body>
+</html>

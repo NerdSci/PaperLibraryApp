@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Paper Library App</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <h1>Tags</h1>
+      <div id="tag-list" class="tag-list"></div>
+      <button id="clear-filter" class="secondary-button">Show all</button>
+      <div class="section">
+        <h2>Hugging Face</h2>
+        <button id="open-hf-search" class="primary-button">Search HF papers</button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section class="top-bar">
+        <div class="search-row">
+          <input id="search-input" type="search" placeholder="Search library" autocomplete="off" />
+          <span class="hint">Press / to search</span>
+        </div>
+        <div class="status" id="status-message"></div>
+      </section>
+
+      <section id="drop-zone" class="drop-zone">
+        <strong>Drag a PDF here to import.</strong>
+        <span>We will detect the arXiv ID from the file content.</span>
+      </section>
+
+      <section>
+        <h2>Library</h2>
+        <div id="library-list" class="library-list"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="hf-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Hugging Face Paper Search</h2>
+        <button id="close-hf-modal" class="icon-button">×</button>
+      </div>
+      <div class="modal-body">
+        <input id="hf-search-input" type="search" placeholder="Search Hugging Face" />
+        <button id="hf-search-button" class="primary-button">Search</button>
+        <div id="hf-results" class="hf-results"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.17.0/pdf.min.js"></script>
+  <script src="/static/main.js"></script>
+</body>
+</html>
