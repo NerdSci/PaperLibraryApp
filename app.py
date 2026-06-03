@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sqlite3
@@ -38,17 +39,45 @@ def close_db(e=None):
         db.close()
 
 
-def fetch_url_with_retries(url, timeout=15, retries=3, backoff=1.0):
-    """Fetch a URL with retries and exponential backoff."""
+def normalize_arxiv_id(arxiv_id):
+    """Strip HF/arXiv prefixes and version suffixes for API and PDF URLs."""
+    if not arxiv_id:
+        return None
+    cleaned = str(arxiv_id).strip()
+    if cleaned.lower().startswith("arxiv:"):
+        cleaned = cleaned.split(":", 1)[1].strip()
+    cleaned = re.sub(r"v\d+$", "", cleaned, flags=re.IGNORECASE)
+    return cleaned or None
+
+
+def fetch_url_with_retries(url, timeout=15, retries=3, backoff=1.0, retry_statuses=(429, 503, 504)):
+    """Fetch a URL with retries, backoff, and optional retry on rate-limit status codes."""
     last_error = None
+    headers = {"User-Agent": "DocsReader/1.0 (local paper library; academic use)"}
+
     for attempt in range(1, retries + 1):
         try:
-            return requests.get(url, timeout=timeout)
+            response = requests.get(url, timeout=timeout, headers=headers)
+            if response.status_code in retry_statuses:
+                last_error = requests.HTTPError(
+                    f"{response.status_code} from arXiv",
+                    response=response,
+                )
+                if attempt == retries:
+                    response.raise_for_status()
+                time.sleep(backoff * attempt * 2)
+                continue
+            response.raise_for_status()
+            return response
         except requests.RequestException as exc:
             last_error = exc
             if attempt == retries:
                 raise
             time.sleep(backoff * attempt)
+
+    if last_error is not None:
+        raise last_error
+    raise requests.RequestException("Request failed after retries.")
 
 
 @app.teardown_appcontext
@@ -103,6 +132,16 @@ def init_db():
     )
     db.commit()
     ensure_default_tags()
+    ensure_highlight_schema()
+
+
+def ensure_highlight_schema():
+    """Add rects_json for multi-rectangle highlights (plan-09)."""
+    db = get_db()
+    columns = {row[1] for row in db.execute("PRAGMA table_info(highlights)").fetchall()}
+    if "rects_json" not in columns:
+        db.execute("ALTER TABLE highlights ADD COLUMN rects_json TEXT")
+        db.commit()
 
 
 def ensure_default_tags():
@@ -171,15 +210,18 @@ def parse_arxiv_id_from_pdf(file_path):
 
 def fetch_arxiv_metadata(arxiv_id):
     """Fetch metadata from the arXiv API for a given arXiv identifier."""
+    canonical_id = normalize_arxiv_id(arxiv_id)
+    if not canonical_id:
+        return None
+
     urls = [
-        f"https://export.arxiv.org/api/query?id_list={arxiv_id}",
-        f"http://export.arxiv.org/api/query?id_list={arxiv_id}",
+        f"https://export.arxiv.org/api/query?id_list={canonical_id}",
+        f"http://export.arxiv.org/api/query?id_list={canonical_id}",
     ]
     last_error = None
     for url in urls:
         try:
-            response = fetch_url_with_retries(url, timeout=15)
-            response.raise_for_status()
+            response = fetch_url_with_retries(url, timeout=20, retries=5, backoff=2.0)
             root = ET.fromstring(response.text)
             entry = root.find("{http://www.w3.org/2005/Atom}entry")
             if entry is None:
@@ -195,7 +237,7 @@ def fetch_arxiv_metadata(arxiv_id):
             source = "arXiv"
             summary = entry.find("{http://www.w3.org/2005/Atom}summary").text.strip() if entry.find("{http://www.w3.org/2005/Atom}summary") is not None else ""
             return {
-                "arxiv_id": arxiv_id,
+                "arxiv_id": canonical_id,
                 "title": title,
                 "authors": authors,
                 "year": year,
@@ -247,21 +289,34 @@ def viewer(paper_id):
 
 @app.route("/api/papers", methods=["GET"])
 def list_papers():
-    """Return the library data, optionally filtered by search query or tag."""
+    """Return the library data, optionally filtered by search query, tag, or source."""
     query = request.args.get("q", "").strip()
     tag_id = request.args.get("tag_id")
+    source = request.args.get("source", "").strip()
+    if source and source not in ("arXiv", "HuggingFace"):
+        return jsonify({"error": "Invalid source filter."}), 400
+
     db = get_db()
     sql = "SELECT p.* FROM papers p"
     params = []
+    conditions = []
+
     if tag_id:
-        sql += " JOIN paper_tags pt ON p.id = pt.paper_id WHERE pt.tag_id = ?"
+        sql += " JOIN paper_tags pt ON p.id = pt.paper_id"
+        conditions.append("pt.tag_id = ?")
         params.append(tag_id)
-        if query:
-            sql += " AND (p.title LIKE ? OR p.authors LIKE ? OR p.extracted_text LIKE ?)"
-            params.extend([f"%{query}%"] * 3)
-    elif query:
-        sql += " WHERE p.title LIKE ? OR p.authors LIKE ? OR p.extracted_text LIKE ?"
+
+    if query:
+        conditions.append("(p.title LIKE ? OR p.authors LIKE ? OR p.extracted_text LIKE ?)")
         params.extend([f"%{query}%"] * 3)
+
+    if source:
+        conditions.append("p.source = ?")
+        params.append(source)
+
+    if conditions:
+        sql += " WHERE " + " AND ".join(conditions)
+
     sql += " ORDER BY p.date_added DESC"
     papers = [row_to_dict(row) for row in db.execute(sql, params).fetchall()]
     for paper in papers:
@@ -337,7 +392,7 @@ def add_paper():
 
 @app.route("/api/update-paper-tags", methods=["POST"])
 def update_paper_tags():
-    """Assign a set of tag IDs to a paper."""
+    """Replace all tag links for one paper (empty list clears tags)."""
     data = request.get_json(silent=True) or {}
     paper_id = data.get("paper_id")
     tag_ids = data.get("tag_ids", [])
@@ -345,8 +400,19 @@ def update_paper_tags():
         return jsonify({"error": "paper_id is required."}), 400
 
     db = get_db()
-    db.execute("DELETE FROM paper_tags WHERE paper_id = ?", (paper_id,))
+    paper = db.execute("SELECT id FROM papers WHERE id = ?", (paper_id,)).fetchone()
+    if paper is None:
+        return jsonify({"error": "Paper not found."}), 404
+
+    valid_tag_ids = []
     for tag_id in tag_ids:
+        row = db.execute("SELECT id FROM tags WHERE id = ?", (tag_id,)).fetchone()
+        if row is None:
+            return jsonify({"error": f"Unknown tag id: {tag_id}"}), 400
+        valid_tag_ids.append(tag_id)
+
+    db.execute("DELETE FROM paper_tags WHERE paper_id = ?", (paper_id,))
+    for tag_id in valid_tag_ids:
         db.execute("INSERT OR IGNORE INTO paper_tags (paper_id, tag_id) VALUES (?, ?)", (paper_id, tag_id))
     db.commit()
     return jsonify({"success": True})
@@ -361,21 +427,60 @@ def paper_highlights(paper_id):
             "SELECT * FROM highlights WHERE paper_id = ? ORDER BY created_at DESC",
             (paper_id,),
         ).fetchall()
-        return jsonify([row_to_dict(row) for row in rows])
+        payload = []
+        for row in rows:
+            item = row_to_dict(row)
+            if item.get("rects_json"):
+                try:
+                    item["rects"] = json.loads(item["rects_json"])
+                except json.JSONDecodeError:
+                    item["rects"] = []
+            payload.append(item)
+        return jsonify(payload)
 
     data = request.get_json(silent=True) or {}
     page_number = data.get("page_number")
-    x = float(data.get("x", 0))
-    y = float(data.get("y", 0))
-    width = float(data.get("width", 0))
-    height = float(data.get("height", 0))
     color = data.get("color", "#FDE68A")
     selected_text = data.get("selected_text", "")
+    rects = data.get("rects")
+
+    # Normalized 0–1 rectangles; fallback to legacy single-box fields.
+    if not rects:
+        rects = [
+            {
+                "x": float(data.get("x", 0)),
+                "y": float(data.get("y", 0)),
+                "width": float(data.get("width", 0)),
+                "height": float(data.get("height", 0)),
+            }
+        ]
+
+    x = min(r["x"] for r in rects)
+    y = min(r["y"] for r in rects)
+    max_x = max(r["x"] + r["width"] for r in rects)
+    max_y = max(r["y"] + r["height"] for r in rects)
+    width = max_x - x
+    height = max_y - y
+    rects_json = json.dumps(rects)
+
     created_at = datetime.datetime.utcnow().isoformat()
     db.execute(
-        "INSERT INTO highlights (paper_id, page_number, x, y, width, height, color, selected_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (paper_id, page_number, x, y, width, height, color, selected_text, created_at),
+        "INSERT INTO highlights (paper_id, page_number, x, y, width, height, color, selected_text, created_at, rects_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (paper_id, page_number, x, y, width, height, color, selected_text, created_at, rects_json),
     )
+    db.commit()
+    highlight_id = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+    return jsonify({"success": True, "highlight_id": highlight_id})
+
+
+@app.route("/api/highlights/item/<int:highlight_id>", methods=["DELETE"])
+def delete_highlight(highlight_id):
+    """Remove one stored highlight rectangle."""
+    db = get_db()
+    row = db.execute("SELECT id, paper_id FROM highlights WHERE id = ?", (highlight_id,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Highlight not found."}), 404
+    db.execute("DELETE FROM highlights WHERE id = ?", (highlight_id,))
     db.commit()
     return jsonify({"success": True})
 
@@ -393,87 +498,110 @@ def serve_pdf(paper_id):
     return send_file(str(pdf_path), mimetype="application/pdf")
 
 
+def _normalize_hf_paper_entry(item):
+    """Map a Hugging Face /api/papers/search item to the JSON shape expected by the UI."""
+    paper = item.get("paper", item) if isinstance(item, dict) else {}
+    if not isinstance(paper, dict):
+        return None
+
+    arxiv_id = normalize_arxiv_id(paper.get("id") or paper.get("arxiv_id"))
+
+    authors = paper.get("authors") or []
+    if authors and isinstance(authors[0], dict):
+        author_str = ", ".join(a.get("name", "") for a in authors if a.get("name"))
+    else:
+        author_str = ", ".join(str(a) for a in authors)
+
+    summary = paper.get("summary") or paper.get("abstract") or ""
+    if summary and len(summary) > 400:
+        summary = summary[:397] + "..."
+
+    return {
+        "id": arxiv_id,
+        "title": paper.get("title") or arxiv_id or "Untitled",
+        "author": author_str or "Unknown author",
+        "description": summary,
+        "arxiv_id": arxiv_id,
+    }
+
+
 @app.route("/api/hf-search", methods=["GET"])
 def hf_search():
-    """Search the Hugging Face hub for papers or models without requiring a token."""
+    """Search Hugging Face papers index (public /api/papers/search, no token)."""
     query = request.args.get("q", "").strip()
     if not query:
         return jsonify([])
 
-    candidates = [
-        ("https://huggingface.co/api/models", {"search": query}),
-        ("https://huggingface.co/api/hub/search", {"search": query, "type": "model"}),
-    ]
+    # HF enforces a short maximum query length on this endpoint.
+    query = query[:250]
 
-    results = None
-    for hf_url, params in candidates:
-        try:
-            response = fetch_url_with_retries(hf_url, timeout=10, retries=2)
-            if response.status_code == 404:
-                continue
-            response.raise_for_status()
-            data = response.json()
-            if isinstance(data, dict) and "results" in data:
-                results = data["results"]
-            elif isinstance(data, list):
-                results = data
-            else:
-                results = []
-            break
-        except Exception:
-            results = None
-            continue
+    try:
+        response = requests.get(
+            "https://huggingface.co/api/papers/search",
+            params={"q": query, "limit": 12},
+            timeout=15,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except requests.RequestException:
+        return jsonify({"error": "Hugging Face papers search is unavailable."}), 502
 
-    if results is None:
-        return jsonify([])
+    if isinstance(data, dict):
+        results = data.get("papers") or data.get("results") or []
+    elif isinstance(data, list):
+        results = data
+    else:
+        results = []
 
     simplified = []
     for item in results[:12]:
-        metadata = item.get("cardData", {}) if isinstance(item, dict) else {}
-        arxiv_id = None
-        if isinstance(metadata, dict):
-            paper_refs = metadata.get("paper", [])
-            if isinstance(paper_refs, list) and paper_refs:
-                arxiv_id = paper_refs[0].get("external_id") or paper_refs[0].get("arxiv_id")
-        if not arxiv_id and isinstance(item, dict):
-            tags = item.get("tags", [])
-            for tag in tags:
-                if isinstance(tag, str) and tag.startswith("arxiv:"):
-                    arxiv_id = tag.split(":", 1)[1]
-                    break
-        simplified.append(
-            {
-                "id": item.get("id"),
-                "title": item.get("modelId") or item.get("id"),
-                "author": item.get("author"),
-                "description": item.get("cardData", {}).get("description", "") if isinstance(item.get("cardData"), dict) else item.get("summary", ""),
-                "arxiv_id": arxiv_id,
-            }
-        )
+        normalized = _normalize_hf_paper_entry(item)
+        if normalized and normalized.get("arxiv_id"):
+            simplified.append(normalized)
     return jsonify(simplified)
+
+
+def arxiv_http_error_response(exc):
+    """Map arXiv HTTP failures to a clear API status for the UI."""
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        code = exc.response.status_code
+        if code == 429:
+            return jsonify(
+                {"error": "arXiv is rate-limiting requests. Wait a minute, then try Import again."}
+            ), 503
+        if code in (503, 504):
+            return jsonify({"error": "arXiv is temporarily unavailable. Try again shortly."}), 503
+    return jsonify({"error": f"Failed to reach arXiv: {exc}"}), 502
 
 
 @app.route("/api/hf-import", methods=["POST"])
 def hf_import():
     """Import a paper from Hugging Face by arXiv ID if available."""
     data = request.get_json(silent=True) or {}
-    arxiv_id = data.get("arxiv_id")
+    arxiv_id = normalize_arxiv_id(data.get("arxiv_id"))
     if not arxiv_id:
         return jsonify({"error": "arxiv_id is required for import."}), 400
 
     try:
         metadata = fetch_arxiv_metadata(arxiv_id)
-    except Exception as exc:
-        return jsonify({"error": f"Failed to fetch arXiv metadata: {exc}"}), 500
+    except requests.HTTPError as exc:
+        return arxiv_http_error_response(exc)
+    except requests.RequestException as exc:
+        return jsonify({"error": f"Failed to fetch arXiv metadata: {exc}"}), 502
 
     if metadata is None:
-        return jsonify({"error": "arXiv metadata not found."}), 404
+        return jsonify({"error": "arXiv metadata not found for that ID."}), 404
 
-    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-    response = requests.get(pdf_url, timeout=10)
-    response.raise_for_status()
-    pdf_path = PDF_DIR / f"{arxiv_id}.pdf"
-    pdf_path.write_bytes(response.content)
+    pdf_url = f"https://arxiv.org/pdf/{metadata['arxiv_id']}.pdf"
+    try:
+        pdf_response = fetch_url_with_retries(pdf_url, timeout=30, retries=4, backoff=2.0)
+    except requests.HTTPError as exc:
+        return arxiv_http_error_response(exc)
+    except requests.RequestException as exc:
+        return jsonify({"error": f"Failed to download PDF: {exc}"}), 502
+
+    pdf_path = PDF_DIR / f"{metadata['arxiv_id']}.pdf"
+    pdf_path.write_bytes(pdf_response.content)
     extracted_text = ""
     try:
         reader = PdfReader(str(pdf_path))

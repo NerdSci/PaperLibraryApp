@@ -57,13 +57,24 @@ input {
 .tag-chip {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: white;
   padding: 10px 14px;
   color: var(--text);
   cursor: pointer;
+}
+
+.tag-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  vertical-align: middle;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.1);
 }
 
 .tag-chip.active {
@@ -114,6 +125,60 @@ input {
   gap: 8px;
 }
 
+.search-input-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.search-input-wrap input[type="search"] {
+  flex: 1;
+}
+
+.filter-button {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.filter-button:hover,
+.filter-button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.search-filter-panel {
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.search-filter-panel.hidden {
+  display: none;
+}
+
+.filter-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.filter-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
 input[type="search"] {
   width: 100%;
   border: 1px solid var(--border);
@@ -155,6 +220,130 @@ input[type="search"] {
   background: rgba(37, 99, 235, 0.08);
 }
 
+body.page-drag-active .drop-zone {
+  border-color: var(--accent);
+  background: rgba(37, 99, 235, 0.06);
+}
+
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgba(37, 99, 235, 0.12);
+  pointer-events: none;
+}
+
+.drop-overlay p {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 24px 32px;
+  background: var(--panel);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.drop-overlay.hidden {
+  display: none;
+}
+
+.library-section h2 {
+  margin: 0;
+}
+
+.library-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.select-all-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.bulk-action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  background: #eef2ff;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+.bulk-action-bar.hidden {
+  display: none;
+}
+
+.paper-row.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.paper-tags-row {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.edit-tags-button {
+  font-size: 0.85rem;
+  padding: 6px 12px;
+}
+
+.tag-editor-popover {
+  position: fixed;
+  z-index: 15;
+  min-width: 200px;
+  max-width: 280px;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.tag-editor-popover.hidden {
+  display: none;
+}
+
+.tag-editor-title {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.tag-editor-options {
+  display: grid;
+  gap: 8px;
+}
+
+.tag-editor-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.tag-editor-option.saving {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
 .library-list {
   display: grid;
   gap: 16px;
@@ -168,20 +357,39 @@ input[type="search"] {
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   display: flex;
-  justify-content: space-between;
+  align-items: flex-start;
   gap: 16px;
 }
 
-.paper-meta,
-.hf-result {
+.paper-checkbox {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.paper-meta {
   flex: 1;
 }
 
-.paper-title,
-.hf-result-title {
+.paper-title-link,
+.paper-title {
   font-size: 1rem;
   font-weight: 700;
   margin-bottom: 8px;
+  color: var(--accent);
+  text-decoration: none;
+  display: block;
+}
+
+.paper-title-link:hover {
+  text-decoration: underline;
+}
+
+.paper-title {
+  display: block;
 }
 
 .paper-info,
@@ -190,6 +398,28 @@ input[type="search"] {
 .hf-result-meta {
   color: var(--muted);
   line-height: 1.5;
+}
+
+.paper-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.pdf-link {
+  padding: 10px 16px;
+  background: var(--accent);
+  color: white;
+  text-decoration: none;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.pdf-link:hover {
+  opacity: 0.9;
 }
 
 .paper-tags {
@@ -295,63 +525,127 @@ input[type="search"] {
   overflow: hidden;
 }
 
+/* PDF.js expects content-box inside the page container (plan-09). */
+#pdf-container .textLayer,
+#pdf-container .textLayer * {
+  box-sizing: content-box;
+}
+
 #pdf-canvas {
   display: block;
-  width: 100%;
-  height: auto;
+  /* Width/height set in JS to match viewport — avoid width:100% scale drift (plan-08). */
 }
 
-.text-layer {
+/* PDF.js text layer: must sit above canvas for selection (plan-08). */
+#pdf-container .textLayer {
   position: absolute;
   inset: 0;
-  z-index: 2; /* above the canvas so text can be selected */
-  pointer-events: auto; /* allow text selection */
+  z-index: 2;
+  pointer-events: auto;
   -webkit-user-select: text;
   user-select: text;
 }
 
-.text-layer span,
-.text-layer div {
-  color: transparent !important;
-  text-shadow: none !important;
-  background: transparent !important;
-}
-
-.text-layer br {
-  display: none;
-}
-
-.text-item {
-  position: absolute;
-  white-space: pre;
-  /* Keep the overlaid text invisible but selectable so selection copies text
-     while the visible rendering comes from the canvas. */
-  color: transparent;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.text-item {
-  transform-origin: left top;
-}
-
-.text-item::selection,
-.text-item::-moz-selection {
+#pdf-container .textLayer ::selection {
   background: rgba(37, 99, 235, 0.28);
-  color: rgba(15, 23, 42, 1);
 }
 
 .highlight-layer {
   position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 3;
+  user-select: none;
+}
+
+.highlight-fragment-group {
+  position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: 3; /* highlights overlay above text layer */
 }
 
 .highlight-overlay {
   position: absolute;
   pointer-events: none;
-  border-radius: 6px;
+  border-radius: 2px;
+}
+
+.highlight-layer.manage-mode .highlight-fragment-group {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.highlight-layer.manage-mode .highlight-fragment-group:hover .highlight-overlay {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.highlight-color-picker {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.highlight-swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.highlight-swatch.active {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.highlight-list-panel {
+  margin-bottom: 16px;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.highlight-list-panel.hidden {
+  display: none;
+}
+
+.highlight-list-panel h3 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+}
+
+.highlight-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.highlight-list-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.9rem;
+}
+
+.highlight-list-item .snippet {
+  flex: 1;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.highlight-delete-btn {
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  padding: 4px 10px;
 }
 
 @media (max-width: 900px) {

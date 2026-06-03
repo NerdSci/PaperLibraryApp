@@ -7,6 +7,10 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+  <div id="drop-overlay" class="drop-overlay hidden" aria-hidden="true">
+    <p>Drop PDF to import</p>
+  </div>
+
   <div class="app-shell">
     <aside class="sidebar">
       <h1>Tags</h1>
@@ -21,39 +25,73 @@
     <main class="content">
       <section class="top-bar">
         <div class="search-row">
-          <input id="search-input" type="search" placeholder="Search library" autocomplete="off" />
+          <div class="search-input-wrap">
+            <input id="search-input" type="search" placeholder="Search library" autocomplete="off" />
+            <button type="button" id="search-filter-toggle" class="filter-button" aria-label="Filter library" title="Filters">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M4 6h16M7 12h10M10 18h4"/>
+              </svg>
+            </button>
+          </div>
+          <div id="search-filter-panel" class="search-filter-panel hidden">
+            <p id="filter-tag-status" class="filter-status">Tag: All papers</p>
+            <label class="filter-label">
+              <input type="checkbox" id="filter-source-arxiv" />
+              arXiv imports only
+            </label>
+            <label class="filter-label">
+              <input type="checkbox" id="filter-source-hf" />
+              Hugging Face imports only
+            </label>
+            <button type="button" id="filter-clear-all" class="secondary-button">Clear all filters</button>
+          </div>
           <span class="hint">Press / to search</span>
         </div>
         <div class="status" id="status-message"></div>
       </section>
 
       <section id="drop-zone" class="drop-zone">
-        <strong>Drag a PDF here to import.</strong>
-        <span>We will detect the arXiv ID from the file content.</span>
+        <strong>Drag a PDF anywhere on this page to import.</strong>
+        <span>We detect the arXiv ID from file content, not the filename.</span>
       </section>
 
-      <section>
-        <h2>Library</h2>
+      <section class="library-section">
+        <div class="library-header">
+          <h2>Library</h2>
+          <label class="select-all-label">
+            <input type="checkbox" id="select-all-papers" />
+            Select all on page
+          </label>
+        </div>
+        <div id="bulk-action-bar" class="bulk-action-bar hidden">
+          <span id="bulk-selection-count">0 selected</span>
+          <button type="button" id="bulk-apply-tags" class="secondary-button">Apply tags</button>
+          <button type="button" id="bulk-clear-selection" class="secondary-button">Clear selection</button>
+        </div>
         <div id="library-list" class="library-list"></div>
       </section>
     </main>
+  </div>
+
+  <div id="tag-editor-popover" class="tag-editor-popover hidden" role="dialog" aria-label="Edit paper tags">
+    <p class="tag-editor-title">Tags for this paper</p>
+    <div id="tag-editor-options" class="tag-editor-options"></div>
   </div>
 
   <div id="hf-modal" class="modal hidden">
     <div class="modal-content">
       <div class="modal-header">
         <h2>Hugging Face Paper Search</h2>
-        <button id="close-hf-modal" class="icon-button">×</button>
+        <button id="close-hf-modal" class="icon-button" type="button" aria-label="Close">×</button>
       </div>
       <div class="modal-body">
-        <input id="hf-search-input" type="search" placeholder="Search Hugging Face" />
-        <button id="hf-search-button" class="primary-button">Search</button>
+        <input id="hf-search-input" type="search" placeholder="Search Hugging Face papers" />
+        <button id="hf-search-button" class="primary-button" type="button">Search</button>
         <div id="hf-results" class="hf-results"></div>
       </div>
     </div>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.17.0/pdf.min.js"></script>
   <script src="/static/main.js"></script>
 </body>
 </html>

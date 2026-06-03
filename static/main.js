@@ -1,17 +1,186 @@
+/**
+ * Paper Library App — client-side logic for the library page and PDF viewer.
+ * See docs/plan-*.md for feature-level implementation notes.
+ */
+
+/**
+ * PDF.js build served from jsDelivr (pdfjs-dist package).
+ * cdnjs "pdf.js/3.17.0" paths 404 — do not use that host for this version.
+ */
+const PDFJS_CDN = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build"
+
+/** Plan-09: device pixel ratio for canvas + text layer alignment. */
+function getOutputRatio() {
+    return window.devicePixelRatio || 1
+}
+
+/**
+ * Plan-08/09: return true when the browser selection is inside the PDF text layer.
+ */
+function selectionAnchoredIn(containerEl) {
+    const selection = window.getSelection()
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return false
+    const anchor = selection.anchorNode
+    const focus = selection.focusNode
+    return (
+        (anchor && containerEl.contains(anchor)) ||
+        (focus && containerEl.contains(focus))
+    )
+}
+
+/** Resolve a DOM node to its PDF.js text-layer div index, if any. */
+function findTextDivIndex(node, textDivs) {
+    let el = node
+    if (el?.nodeType === Node.TEXT_NODE) el = el.parentElement
+    while (el && el !== document.body) {
+        const idx = textDivs.indexOf(el)
+        if (idx >= 0) return idx
+        el = el.parentElement
+    }
+    return -1
+}
+
+/**
+ * Plan-09: extract text using PDF.js textDiv order (reading order for typical PDFs).
+ */
+function extractTextFromTextDivs(range, textDivs, textContentItemsStr, textItems) {
+    if (!range || range.collapsed) return ""
+
+    const startIdx = findTextDivIndex(range.startContainer, textDivs)
+    const endIdx = findTextDivIndex(range.endContainer, textDivs)
+    if (startIdx < 0 || endIdx < 0) {
+        return range.toString().trim()
+    }
+
+    const lo = Math.min(startIdx, endIdx)
+    const hi = Math.max(startIdx, endIdx)
+    let parts = []
+    for (let i = lo; i <= hi; i++) {
+        const chunk = textContentItemsStr[i] ?? textDivs[i]?.textContent ?? ""
+        if (chunk) parts.push(chunk)
+        const item = textItems?.[i]
+        if (item?.hasEOL && i < hi) parts.push(" ")
+    }
+
+    const joined = parts.join("").replace(/[ \t]+/g, " ").trim()
+    return joined || range.toString().trim()
+}
+
+/** Convert a viewport client rect to normalized 0–1 coords against a reference element. */
+function normalizeClientRect(rect, referenceEl) {
+    const ref = referenceEl.getBoundingClientRect()
+    if (!ref.width || !ref.height) return null
+    return {
+        x: (rect.left - ref.left) / ref.width,
+        y: (rect.top - ref.top) / ref.height,
+        width: rect.width / ref.width,
+        height: rect.height / ref.height,
+    }
+}
+
+/** Merge normalized rects into one bounding box (legacy x/y/width/height). */
+function unionNormalizedRects(rects) {
+    if (!rects?.length) return null
+    let minX = Infinity
+    let minY = Infinity
+    let maxX = -Infinity
+    let maxY = -Infinity
+    for (const r of rects) {
+        minX = Math.min(minX, r.x)
+        minY = Math.min(minY, r.y)
+        maxX = Math.max(maxX, r.x + r.width)
+        maxY = Math.max(maxY, r.y + r.height)
+    }
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY }
+}
+
+/**
+ * Plan-09: one rect per selection line from getClientRects; fallback to intersecting text divs.
+ */
+function captureNormalizedRects(range, referenceEl, textDivs) {
+    const ref = referenceEl.getBoundingClientRect()
+    if (!ref.width || !ref.height) return []
+
+    const clientRects = Array.from(range.getClientRects()).filter((r) => r.width > 0.5 || r.height > 0.5)
+    let rects = clientRects
+        .map((r) => normalizeClientRect(r, referenceEl))
+        .filter(Boolean)
+
+    if (textDivs?.length) {
+        const rangeRects = Array.from(range.getClientRects())
+        const divRects = []
+        for (const div of textDivs) {
+            const divRect = div.getBoundingClientRect()
+            const hits = rangeRects.some(
+                (r) =>
+                    divRect.left < r.right &&
+                    r.left < divRect.right &&
+                    divRect.top < r.bottom &&
+                    r.top < divRect.bottom,
+            )
+            if (hits) {
+                const normalized = normalizeClientRect(divRect, referenceEl)
+                if (normalized) divRects.push(normalized)
+            }
+        }
+        if (divRects.length) rects = divRects
+    }
+
+    if (!rects.length) {
+        const fallback = normalizeClientRect(range.getBoundingClientRect(), referenceEl)
+        if (fallback) rects = [fallback]
+    }
+
+    return rects
+}
+
+/** Parse stored highlight geometry (multi-rect or legacy single box). */
+function getHighlightRects(highlight) {
+    if (Array.isArray(highlight.rects) && highlight.rects.length) {
+        return highlight.rects
+    }
+    if (highlight.rects_json) {
+        try {
+            const parsed = JSON.parse(highlight.rects_json)
+            if (Array.isArray(parsed) && parsed.length) return parsed
+        } catch {
+            /* use legacy fields */
+        }
+    }
+    return [
+        {
+            x: highlight.x,
+            y: highlight.y,
+            width: highlight.width,
+            height: highlight.height,
+        },
+    ]
+}
+
+/** Translucent highlight colours aligned with default tag palette (plan-07). */
+const HIGHLIGHT_COLORS = [
+    { label: "Yellow", value: "rgba(253, 230, 138, 0.45)" },
+    { label: "Red", value: "rgba(253, 164, 175, 0.45)" },
+    { label: "Green", value: "rgba(134, 239, 172, 0.45)" },
+    { label: "Blue", value: "rgba(147, 197, 253, 0.45)" },
+    { label: "Purple", value: "rgba(196, 181, 253, 0.45)" },
+]
+
 const api = {
     fetchJson: async (url, opts = {}) => {
         const response = await fetch(url, opts)
+        const data = await response.json().catch(() => ({}))
         if (!response.ok) {
-            const data = await response.json().catch(() => ({}))
             throw new Error(data.error || response.statusText)
         }
-        return response.json()
+        return data
     },
 
-    getPapers: async (query = "", tagId = null) => {
+    getPapers: async (query = "", tagId = null, source = null) => {
         const params = new URLSearchParams()
         if (query) params.set("q", query)
         if (tagId) params.set("tag_id", tagId)
+        if (source) params.set("source", source)
         return api.fetchJson(`/api/papers?${params.toString()}`)
     },
 
@@ -50,6 +219,10 @@ const api = {
             body: JSON.stringify(highlight),
         })
     },
+
+    deleteHighlight: async (highlightId) => {
+        return api.fetchJson(`/api/highlights/item/${highlightId}`, { method: "DELETE" })
+    },
 }
 
 const dom = {
@@ -59,6 +232,24 @@ const dom = {
     $all(selector) {
         return Array.from(document.querySelectorAll(selector))
     },
+}
+
+/** Index-page state shared across library, tags, filters, and bulk actions. */
+const indexState = {
+    currentTagFilter: null,
+    sourceFilter: null,
+    cachedTags: null,
+    selectedPaperIds: new Set(),
+    editingPaperId: null,
+    tagEditorTargetIds: null,
+    uploadInProgress: false,
+    dragDepth: 0,
+}
+
+function escapeHtml(text) {
+    const div = document.createElement("div")
+    div.textContent = text == null ? "" : String(text)
+    return div.innerHTML
 }
 
 function showStatus(message, type = "info") {
@@ -74,15 +265,46 @@ function showStatus(message, type = "info") {
     }
 }
 
+function getActiveSourceFilter() {
+    const arxiv = dom.$("#filter-source-arxiv")?.checked
+    const hf = dom.$("#filter-source-hf")?.checked
+    if (arxiv && !hf) return "arXiv"
+    if (hf && !arxiv) return "HuggingFace"
+    return null
+}
+
+function updateFilterPanelStatus() {
+    const statusEl = dom.$("#filter-tag-status")
+    if (!statusEl) return
+    const tagName = indexState.currentTagFilter
+        ? indexState.cachedTags?.find((t) => t.id === indexState.currentTagFilter)?.name
+        : null
+    const source = getActiveSourceFilter()
+    const parts = []
+    parts.push(tagName ? `Tag: ${tagName}` : "Tag: All papers")
+    if (source) parts.push(`Source: ${source}`)
+    statusEl.textContent = parts.join(" · ")
+}
+
+async function ensureTagsCached() {
+    if (!indexState.cachedTags) {
+        indexState.cachedTags = await api.getTags()
+    }
+    return indexState.cachedTags
+}
+
 async function renderTags(selectedTag) {
-    const tags = await api.getTags()
+    const tags = await ensureTagsCached()
     const container = dom.$("#tag-list")
     container.innerHTML = ""
     const allTag = document.createElement("button")
     allTag.type = "button"
     allTag.className = selectedTag ? "tag-chip" : "tag-chip active"
     allTag.textContent = "All"
-    allTag.addEventListener("click", () => loadLibrary())
+    allTag.addEventListener("click", () => {
+        clearPaperSelection()
+        loadLibrary(dom.$("#search-input").value.trim(), null)
+    })
     container.appendChild(allTag)
 
     tags.forEach((tag) => {
@@ -90,49 +312,241 @@ async function renderTags(selectedTag) {
         button.type = "button"
         button.className = tag.id === selectedTag ? "tag-chip active" : "tag-chip"
         button.style.borderColor = tag.color
-        button.textContent = tag.name
-        button.addEventListener("click", () => loadLibrary(dom.$("#search-input").value.trim(), tag.id))
+        button.innerHTML = `<span class="tag-dot" style="background-color: ${tag.color};"></span><span>${escapeHtml(tag.name)}</span>`
+        button.addEventListener("click", () => {
+            clearPaperSelection()
+            loadLibrary(dom.$("#search-input").value.trim(), tag.id)
+        })
         container.appendChild(button)
     })
+    updateFilterPanelStatus()
 }
 
-async function renderLibrary(query = "", tagId = null) {
-    const papers = await api.getPapers(query, tagId)
+function updateBulkBar() {
+    const bar = dom.$("#bulk-action-bar")
+    const countEl = dom.$("#bulk-selection-count")
+    const n = indexState.selectedPaperIds.size
+    if (!bar) return
+    if (n === 0) {
+        bar.classList.add("hidden")
+    } else {
+        bar.classList.remove("hidden")
+        countEl.textContent = `${n} selected`
+    }
+}
+
+function clearPaperSelection() {
+    indexState.selectedPaperIds.clear()
+    const selectAll = dom.$("#select-all-papers")
+    if (selectAll) selectAll.checked = false
+    dom.$all(".paper-checkbox").forEach((cb) => {
+        cb.checked = false
+    })
+    dom.$all(".paper-row.selected").forEach((row) => row.classList.remove("selected"))
+    updateBulkBar()
+}
+
+async function renderLibrary(query = "", tagId = null, source = null) {
+    const papers = await api.getPapers(query, tagId, source)
     const container = dom.$("#library-list")
     container.innerHTML = ""
+
     if (papers.length === 0) {
-        container.innerHTML = "<p class=\"empty-state\">No matching papers yet.</p>"
+        container.innerHTML = '<p class="empty-state">No matching papers yet.</p>'
         return
     }
 
     papers.forEach((paper) => {
         const card = document.createElement("article")
         card.className = "paper-row"
-        const tagChipHtml = paper.tags.map((tag) => `<span class=\"paper-tag\" style=\"background:${tag.color};\">${tag.name}</span>`).join("")
-        card.innerHTML = `
-      <div class="paper-meta">
-        <div class="paper-title">${paper.title}</div>
-        <div class="paper-info">${paper.authors} · [${paper.category}] · ${paper.year} · ${paper.source}</div>
-        <div class="paper-tags">${tagChipHtml}</div>
-      </div>
-      <div class="paper-actions">
-        <a class="secondary-button" href="/viewer/${paper.id}">PDF</a>
-      </div>
-    `
+        card.dataset.paperId = String(paper.id)
+        if (indexState.selectedPaperIds.has(paper.id)) {
+            card.classList.add("selected")
+        }
+
+        const checkbox = document.createElement("input")
+        checkbox.type = "checkbox"
+        checkbox.className = "paper-checkbox"
+        checkbox.checked = indexState.selectedPaperIds.has(paper.id)
+        checkbox.addEventListener("change", () => {
+            if (checkbox.checked) {
+                indexState.selectedPaperIds.add(paper.id)
+                card.classList.add("selected")
+            } else {
+                indexState.selectedPaperIds.delete(paper.id)
+                card.classList.remove("selected")
+            }
+            updateBulkBar()
+        })
+
+        const meta = document.createElement("div")
+        meta.className = "paper-meta"
+
+        const titleLink = document.createElement("a")
+        titleLink.className = "paper-title-link"
+        titleLink.href = `/viewer/${paper.id}`
+        titleLink.textContent = paper.title
+
+        const info = document.createElement("div")
+        info.className = "paper-info"
+        info.textContent = `${paper.authors} · [${paper.category}] · ${paper.year} · ${paper.source}`
+
+        const tagsRow = document.createElement("div")
+        tagsRow.className = "paper-tags-row"
+
+        const chipsWrap = document.createElement("div")
+        chipsWrap.className = "paper-tags"
+        paper.tags.forEach((tag) => {
+            const chip = document.createElement("span")
+            chip.className = "paper-tag"
+            chip.style.background = tag.color
+            chip.textContent = tag.name
+            chipsWrap.appendChild(chip)
+        })
+
+        const editTagsBtn = document.createElement("button")
+        editTagsBtn.type = "button"
+        editTagsBtn.className = "secondary-button edit-tags-button"
+        editTagsBtn.textContent = "Edit tags"
+        editTagsBtn.addEventListener("click", (event) => {
+            event.preventDefault()
+            openTagEditor(paper.id, paper.tags.map((t) => t.id), editTagsBtn)
+        })
+
+        tagsRow.appendChild(chipsWrap)
+        tagsRow.appendChild(editTagsBtn)
+
+        meta.appendChild(titleLink)
+        meta.appendChild(info)
+        meta.appendChild(tagsRow)
+
+        const actions = document.createElement("div")
+        actions.className = "paper-actions"
+        const pdfLink = document.createElement("a")
+        pdfLink.className = "pdf-link"
+        pdfLink.href = `/viewer/${paper.id}`
+        pdfLink.textContent = "PDF"
+        actions.appendChild(pdfLink)
+
+        card.appendChild(checkbox)
+        card.appendChild(meta)
+        card.appendChild(actions)
         container.appendChild(card)
     })
+
+    const selectAll = dom.$("#select-all-papers")
+    if (selectAll) {
+        const visibleIds = papers.map((p) => p.id)
+        selectAll.checked = visibleIds.length > 0 && visibleIds.every((id) => indexState.selectedPaperIds.has(id))
+    }
 }
 
-let currentTagFilter = null
-
-async function loadLibrary(query = "", tagId = null) {
-    currentTagFilter = tagId
-    await renderTags(tagId)
-    await renderLibrary(query, tagId)
+async function loadLibrary(query = "", tagId = undefined, source = undefined) {
+    if (tagId !== undefined) {
+        indexState.currentTagFilter = tagId
+    }
+    if (source !== undefined) {
+        indexState.sourceFilter = source
+    }
+    const effectiveSource = indexState.sourceFilter
+    await renderTags(indexState.currentTagFilter)
+    await renderLibrary(query, indexState.currentTagFilter, effectiveSource)
+    updateBulkBar()
 }
 
-function activateDropZone() {
+function closeTagEditor() {
+    const popover = dom.$("#tag-editor-popover")
+    if (popover) popover.classList.add("hidden")
+    indexState.editingPaperId = null
+    indexState.tagEditorTargetIds = null
+}
+
+async function openTagEditor(paperIdOrIds, assignedTagIds, anchorEl) {
+    const paperIds = Array.isArray(paperIdOrIds) ? paperIdOrIds : [paperIdOrIds]
+    indexState.tagEditorTargetIds = paperIds
+    indexState.editingPaperId = paperIds.length === 1 ? paperIds[0] : null
+
+    const tags = await ensureTagsCached()
+    const popover = dom.$("#tag-editor-popover")
+    const options = dom.$("#tag-editor-options")
+    const title = popover.querySelector(".tag-editor-title")
+    title.textContent = paperIds.length > 1 ? `Tags for ${paperIds.length} papers` : "Tags for this paper"
+
+    options.innerHTML = ""
+    const selectedSet = new Set(assignedTagIds)
+
+    tags.forEach((tag) => {
+        const label = document.createElement("label")
+        label.className = "tag-editor-option"
+        const input = document.createElement("input")
+        input.type = "checkbox"
+        input.checked = selectedSet.has(tag.id)
+        input.dataset.tagId = String(tag.id)
+        const dot = document.createElement("span")
+        dot.className = "tag-dot"
+        dot.style.backgroundColor = tag.color
+        label.appendChild(input)
+        label.appendChild(dot)
+        label.appendChild(document.createTextNode(tag.name))
+
+        input.addEventListener("change", async () => {
+            label.classList.add("saving")
+            const checkedIds = dom
+                .$all("#tag-editor-options input:checked")
+                .map((el) => parseInt(el.dataset.tagId, 10))
+
+            try {
+                for (const pid of indexState.tagEditorTargetIds) {
+                    await api.savePaperTags(pid, checkedIds)
+                }
+                showStatus("Tags updated.", "success")
+                await loadLibrary(dom.$("#search-input").value.trim())
+                closeTagEditor()
+            } catch (error) {
+                showStatus(error.message || "Could not save tags.", "error")
+                input.checked = !input.checked
+            } finally {
+                label.classList.remove("saving")
+            }
+        })
+
+        options.appendChild(label)
+    })
+
+    const rect = anchorEl.getBoundingClientRect()
+    popover.classList.remove("hidden")
+    popover.style.top = `${rect.bottom + window.scrollY + 8}px`
+    popover.style.left = `${Math.min(rect.left + window.scrollX, window.innerWidth - 300)}px`
+}
+
+function isPdfFile(file) {
+    if (!file) return false
+    return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")
+}
+
+async function handleFileUpload(file) {
+    if (!isPdfFile(file)) {
+        showStatus("Only PDF files are supported.", "error")
+        return
+    }
+    if (indexState.uploadInProgress) return
+    indexState.uploadInProgress = true
+    try {
+        showStatus("Uploading PDF and looking up metadata…", "info")
+        await api.uploadPdf(file)
+        showStatus("Paper added successfully.", "success")
+        loadLibrary(dom.$("#search-input").value.trim())
+    } catch (error) {
+        showStatus(error.message || "Upload failed.", "error")
+    } finally {
+        indexState.uploadInProgress = false
+    }
+}
+
+/** Plan-03: accept drops anywhere on the index page, not only the drop zone. */
+function activateGlobalDrop() {
     const dropZone = dom.$("#drop-zone")
+    const overlay = dom.$("#drop-overlay")
     const fileInput = document.createElement("input")
     fileInput.type = "file"
     fileInput.accept = ".pdf"
@@ -148,30 +562,50 @@ function activateDropZone() {
         }
     })
 
-    dropZone.addEventListener("dragover", (event) => {
-        event.preventDefault()
-        dropZone.classList.add("drag-over")
-    })
-    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("drag-over"))
-    dropZone.addEventListener("drop", async (event) => {
-        event.preventDefault()
-        dropZone.classList.remove("drag-over")
-        const file = event.dataTransfer.files[0]
-        if (file) {
-            await handleFileUpload(file)
-        }
-    })
-}
+    const hasFileDrag = (event) => Array.from(event.dataTransfer?.types || []).includes("Files")
 
-async function handleFileUpload(file) {
-    try {
-        showStatus("Uploading PDF and looking up metadata…", "info")
-        await api.uploadPdf(file)
-        showStatus("Paper added successfully.", "success")
-        loadLibrary(dom.$("#search-input").value.trim(), currentTagFilter)
-    } catch (error) {
-        showStatus(error.message || "Upload failed.", "error")
+    const onDragEnter = (event) => {
+        if (!hasFileDrag(event)) return
+        if (!dom.$("#hf-modal")?.classList.contains("hidden")) return
+        event.preventDefault()
+        indexState.dragDepth += 1
+        document.body.classList.add("page-drag-active")
+        overlay?.classList.remove("hidden")
+        dropZone?.classList.add("drag-over")
     }
+
+    const onDragLeave = (event) => {
+        if (!hasFileDrag(event)) return
+        indexState.dragDepth = Math.max(0, indexState.dragDepth - 1)
+        if (indexState.dragDepth === 0) {
+            document.body.classList.remove("page-drag-active")
+            overlay?.classList.add("hidden")
+            dropZone?.classList.remove("drag-over")
+        }
+    }
+
+    const onDragOver = (event) => {
+        if (!hasFileDrag(event)) return
+        if (!dom.$("#hf-modal")?.classList.contains("hidden")) return
+        event.preventDefault()
+    }
+
+    const onDrop = async (event) => {
+        if (!hasFileDrag(event)) return
+        if (!dom.$("#hf-modal")?.classList.contains("hidden")) return
+        event.preventDefault()
+        indexState.dragDepth = 0
+        document.body.classList.remove("page-drag-active")
+        overlay?.classList.add("hidden")
+        dropZone?.classList.remove("drag-over")
+        const file = event.dataTransfer.files[0]
+        if (file) await handleFileUpload(file)
+    }
+
+    document.body.addEventListener("dragenter", onDragEnter)
+    document.body.addEventListener("dragleave", onDragLeave)
+    document.body.addEventListener("dragover", onDragOver)
+    document.body.addEventListener("drop", onDrop)
 }
 
 function addKeyboardSearchShortcut() {
@@ -180,6 +614,80 @@ function addKeyboardSearchShortcut() {
             event.preventDefault()
             dom.$("#search-input").focus()
         }
+        if (event.key === "Escape") {
+            closeTagEditor()
+            dom.$("#search-filter-panel")?.classList.add("hidden")
+        }
+    })
+}
+
+function activateSearchFilterPanel() {
+    const toggle = dom.$("#search-filter-toggle")
+    const panel = dom.$("#search-filter-panel")
+    const clearBtn = dom.$("#filter-clear-all")
+    const arxivCb = dom.$("#filter-source-arxiv")
+    const hfCb = dom.$("#filter-source-hf")
+
+    toggle?.addEventListener("click", () => {
+        panel.classList.toggle("hidden")
+        toggle.classList.toggle("active", !panel.classList.contains("hidden"))
+    })
+
+    const applySourceFilter = () => {
+        if (arxivCb.checked && hfCb.checked) {
+            showStatus("Select only one source filter, or clear both.", "error")
+            return
+        }
+        indexState.sourceFilter = getActiveSourceFilter()
+        clearPaperSelection()
+        loadLibrary(dom.$("#search-input").value.trim())
+    }
+
+    arxivCb?.addEventListener("change", () => {
+        if (arxivCb.checked) hfCb.checked = false
+        applySourceFilter()
+    })
+    hfCb?.addEventListener("change", () => {
+        if (hfCb.checked) arxivCb.checked = false
+        applySourceFilter()
+    })
+
+    clearBtn?.addEventListener("click", () => {
+        dom.$("#search-input").value = ""
+        arxivCb.checked = false
+        hfCb.checked = false
+        indexState.sourceFilter = null
+        indexState.currentTagFilter = null
+        clearPaperSelection()
+        loadLibrary()
+    })
+}
+
+function activateBulkActions() {
+    dom.$("#bulk-apply-tags")?.addEventListener("click", () => {
+        const ids = Array.from(indexState.selectedPaperIds)
+        if (ids.length === 0) return
+        const anchor = dom.$("#bulk-apply-tags")
+        openTagEditor(ids, [], anchor)
+    })
+    dom.$("#bulk-clear-selection")?.addEventListener("click", clearPaperSelection)
+
+    dom.$("#select-all-papers")?.addEventListener("change", (event) => {
+        const checked = event.target.checked
+        dom.$all(".paper-row").forEach((row) => {
+            const id = parseInt(row.dataset.paperId, 10)
+            const cb = row.querySelector(".paper-checkbox")
+            if (checked) {
+                indexState.selectedPaperIds.add(id)
+                row.classList.add("selected")
+                if (cb) cb.checked = true
+            } else {
+                indexState.selectedPaperIds.delete(id)
+                row.classList.remove("selected")
+                if (cb) cb.checked = false
+            }
+        })
+        updateBulkBar()
     })
 }
 
@@ -198,9 +706,7 @@ function activateHfModal() {
     closeButton.addEventListener("click", () => modal.classList.add("hidden"))
     searchButton.addEventListener("click", () => doHfSearch(searchInput.value.trim(), results))
     searchInput.addEventListener("keypress", (event) => {
-        if (event.key === "Enter") {
-            doHfSearch(searchInput.value.trim(), results)
-        }
+        if (event.key === "Enter") doHfSearch(searchInput.value.trim(), results)
     })
 }
 
@@ -209,26 +715,36 @@ async function doHfSearch(query, resultsContainer) {
         resultsContainer.innerHTML = "<p class='empty-state'>Enter a query to search.</p>"
         return
     }
-    resultsContainer.innerHTML = "<p class='loading'>Searching Hugging Face…</p>"
+    resultsContainer.innerHTML = "<p class='loading'>Searching Hugging Face papers…</p>"
     try {
         const items = await api.hfSearch(query)
-        if (items.error) {
-            throw new Error(items.error)
-        }
-        if (items.length === 0) {
-            resultsContainer.innerHTML = "<p class='empty-state'>No results found.</p>"
+        if (items.error) throw new Error(items.error)
+        if (!Array.isArray(items) || items.length === 0) {
+            resultsContainer.innerHTML = "<p class='empty-state'>No papers found.</p>"
             return
         }
         resultsContainer.innerHTML = ""
         items.forEach((item) => {
             const card = document.createElement("article")
             card.className = "hf-result"
-            card.innerHTML = `
-        <div class="hf-result-title">${item.title}</div>
-        <div class="hf-result-author">${item.author || "Unknown author"}</div>
-        <div class="hf-result-desc">${item.description || "No description."}</div>
-        <div class="hf-result-meta">arXiv ID: ${item.arxiv_id || "None provided"}</div>
-      ` 
+            const title = document.createElement("div")
+            title.className = "hf-result-title"
+            title.textContent = item.title
+            const author = document.createElement("div")
+            author.className = "hf-result-author"
+            author.textContent = item.author || "Unknown author"
+            const desc = document.createElement("div")
+            desc.className = "hf-result-desc"
+            desc.textContent = item.description || "No description."
+            const meta = document.createElement("div")
+            meta.className = "hf-result-meta"
+            meta.textContent = `arXiv ID: ${item.arxiv_id || "None"}`
+
+            card.appendChild(title)
+            card.appendChild(author)
+            card.appendChild(desc)
+            card.appendChild(meta)
+
             const importButton = document.createElement("button")
             importButton.type = "button"
             importButton.className = "primary-button"
@@ -236,62 +752,84 @@ async function doHfSearch(query, resultsContainer) {
             importButton.disabled = !item.arxiv_id
             importButton.addEventListener("click", async () => {
                 if (!item.arxiv_id) return
+                importButton.disabled = true
+                importButton.textContent = "Importing…"
                 try {
                     await api.hfImport(item.arxiv_id)
-                    showStatus("Imported paper from Hugging Face successfully.", "success")
-                    loadLibrary(dom.$("#search-input").value.trim(), currentTagFilter)
+                    showStatus("Imported paper from Hugging Face.", "success")
+                    loadLibrary(dom.$("#search-input").value.trim())
                 } catch (err) {
                     showStatus(err.message || "Import failed.", "error")
+                } finally {
+                    importButton.disabled = false
+                    importButton.textContent = "Import"
                 }
             })
             card.appendChild(importButton)
             resultsContainer.appendChild(card)
         })
     } catch (error) {
-        resultsContainer.innerHTML = `<p class='empty-state'>${error.message || "Search failed."}</p>`
+        resultsContainer.innerHTML = `<p class='empty-state'>${escapeHtml(error.message || "Search failed.")}</p>`
     }
 }
 
 async function initIndexPage() {
-    activateDropZone()
-    addKeyboardSearchShortcut()
-    activateHfModal()
-    dom.$("#search-input").addEventListener("input", (event) => {
-        loadLibrary(event.target.value.trim(), currentTagFilter)
+    document.addEventListener("click", (event) => {
+        const popover = dom.$("#tag-editor-popover")
+        if (!popover || popover.classList.contains("hidden")) return
+        if (popover.contains(event.target) || event.target.closest(".edit-tags-button") || event.target.closest("#bulk-apply-tags")) {
+            return
+        }
+        closeTagEditor()
     })
+
+    activateGlobalDrop()
+    addKeyboardSearchShortcut()
+    activateSearchFilterPanel()
+    activateBulkActions()
+    activateHfModal()
+
+    dom.$("#search-input").addEventListener("input", (event) => {
+        clearPaperSelection()
+        loadLibrary(event.target.value.trim())
+    })
+
     dom.$("#clear-filter").addEventListener("click", () => {
         dom.$("#search-input").value = ""
+        dom.$("#filter-source-arxiv").checked = false
+        dom.$("#filter-source-hf").checked = false
+        indexState.sourceFilter = null
+        indexState.currentTagFilter = null
+        clearPaperSelection()
         loadLibrary()
     })
+
     loadLibrary()
 }
 
-function createOverlay(highlight) {
-    const div = document.createElement("div")
-    div.className = "highlight-overlay"
-    div.style.left = `${highlight.x * 100}%`
-    div.style.top = `${highlight.y * 100}%`
-    div.style.width = `${highlight.width * 100}%`
-    div.style.height = `${highlight.height * 100}%`
-    div.style.backgroundColor = highlight.color
-    return div
-}
+/** Plan-09: render one or more normalized rects as highlight overlays. */
+function createHighlightFragments(highlight, options = {}) {
+    const wrapper = document.createElement("div")
+    wrapper.className = "highlight-fragment-group"
+    wrapper.dataset.highlightId = highlight.id
 
-function sortTextLayerByVisualPosition(textLayer) {
-    window.__sortTextLayerRan = true
-    const spans = Array.from(textLayer.querySelectorAll('span'))
-    spans.sort((a, b) => {
-        const rectA = a.getBoundingClientRect()
-        const rectB = b.getBoundingClientRect()
-        const topDiff = rectA.top - rectB.top
-        if (Math.abs(topDiff) > 3) {
-            return topDiff
-        }
-        return rectA.left - rectB.left
+    const rects = getHighlightRects(highlight)
+    rects.forEach((rect) => {
+        const div = document.createElement("div")
+        div.className = "highlight-overlay"
+        div.style.left = `${rect.x * 100}%`
+        div.style.top = `${rect.y * 100}%`
+        div.style.width = `${rect.width * 100}%`
+        div.style.height = `${rect.height * 100}%`
+        div.style.backgroundColor = highlight.color
+        wrapper.appendChild(div)
     })
 
-    spans.forEach((span) => textLayer.appendChild(span))
-    Array.from(textLayer.querySelectorAll('br')).forEach((br) => br.remove())
+    if (options.onClickDelete) {
+        wrapper.title = "Click to delete this highlight"
+        wrapper.addEventListener("click", () => options.onClickDelete(highlight))
+    }
+    return wrapper
 }
 
 async function initViewerPage() {
@@ -304,146 +842,207 @@ async function initViewerPage() {
     const pageInfo = dom.$("#page-info")
     const pdfContainer = dom.$("#pdf-container")
     const saveButton = dom.$("#save-highlight")
+    const colorPicker = dom.$("#highlight-color-picker")
+    const manageToggle = dom.$("#toggle-highlight-manage")
+    const listPanel = dom.$("#highlight-list-panel")
+    const listEl = dom.$("#highlight-list")
 
     let pdfDoc = null
     let currentPage = 1
-    let pageScale = 1.25
-    let pageViewport = null
+    const pageScale = 1.25
     let selectedBox = null
+    let selectedHighlightColor = HIGHLIGHT_COLORS[0].value
+    let manageHighlightsMode = false
+    let allHighlights = []
+    /** Cancelled when the user changes page (plan-08). */
+    let activeTextLayerTask = null
+    /** PDF.js text divs / items for the current page (plan-09). */
+    let pageTextDivs = []
+    let pageTextContentItemsStr = []
+    let pageTextItems = []
+    let isPageRendering = false
 
     if (typeof pdfjsLib === "undefined") {
-        loader.textContent = "PDF.js failed to initialize. Please check your internet connection or use a supported browser."
+        loader.textContent =
+            "PDF.js could not load (script missing or blocked). Check your network or try refreshing."
         return
     }
-    pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.worker.min.js"
+
+    // Worker must match the same pdfjs-dist version as pdf.min.js above.
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS_CDN}/pdf.worker.min.js`
     const documentUrl = `/api/pdf/${window.PAPER_ID}`
 
-    const renderPage = async (pageNumber) => {
-        const page = await pdfDoc.getPage(pageNumber)
-        const viewport = page.getViewport({ scale: pageScale })
-        const context = canvas.getContext("2d")
-        canvas.width = viewport.width
-        canvas.height = viewport.height
-        pageViewport = viewport
-
-        const renderContext = { canvasContext: context, viewport }
-        await page.render(renderContext).promise
-        pdfContainer.style.width = `${viewport.width}px`
-        pdfContainer.style.height = `${viewport.height}px`
-        textLayer.innerHTML = ""
-
-        const textContent = await page.getTextContent()
-        const items = textContent.items.map((item) => {
-            const tm = pdfjsLib.Util.transform(viewport.transform, item.transform)
-            return {
-                item,
-                tm,
-                top: tm[5],
-                left: tm[4],
-            }
+    HIGHLIGHT_COLORS.forEach((entry, index) => {
+        const swatch = document.createElement("button")
+        swatch.type = "button"
+        swatch.className = "highlight-swatch" + (index === 0 ? " active" : "")
+        swatch.style.backgroundColor = entry.value.replace(/[\d.]+\)$/, "1)")
+        swatch.title = entry.label
+        swatch.addEventListener("click", () => {
+            selectedHighlightColor = entry.value
+            dom.$all(".highlight-swatch").forEach((el) => el.classList.remove("active"))
+            swatch.classList.add("active")
+            if (selectedBox) selectedBox.color = selectedHighlightColor
         })
+        colorPicker.appendChild(swatch)
+    })
 
-        items.sort((a, b) => {
-            const topDiff = a.top - b.top
-            if (Math.abs(topDiff) > 5) {
-                return topDiff
-            }
-            return a.left - b.left
+    const renderHighlightList = () => {
+        listEl.innerHTML = ""
+        const onPage = allHighlights.filter((h) => h.page_number === currentPage)
+        if (onPage.length === 0) {
+            listEl.innerHTML = "<li class='empty-state'>No highlights on this page.</li>"
+            return
+        }
+        onPage.forEach((highlight) => {
+            const li = document.createElement("li")
+            li.className = "highlight-list-item"
+            const snippet = document.createElement("span")
+            snippet.className = "snippet"
+            snippet.textContent = highlight.selected_text || "(no text captured)"
+            const del = document.createElement("button")
+            del.type = "button"
+            del.className = "secondary-button highlight-delete-btn"
+            del.textContent = "Delete"
+            del.addEventListener("click", () => deleteHighlightById(highlight.id))
+            li.appendChild(snippet)
+            li.appendChild(del)
+            listEl.appendChild(li)
         })
+    }
 
-        items.forEach(({ item, tm }) => {
-            const span = document.createElement("span")
-            span.textContent = item.str
-
-            span.style.display = 'inline-block'
-            span.style.color = 'transparent'
-            span.style.opacity = '1'
-            span.style.textShadow = 'none'
-            span.style.fontSize = '0.5px'
-            span.style.lineHeight = '1'
-            span.style.whiteSpace = 'pre'
-            span.style.position = 'absolute'
-            span.style.left = '0px'
-            span.style.top = '0px'
-            span.style.transform = `matrix(${tm[0].toFixed(6)}, ${tm[1].toFixed(6)}, ${tm[2].toFixed(6)}, ${tm[3].toFixed(6)}, ${tm[4].toFixed(2)}, ${tm[5].toFixed(2)}) scaleY(-1)`
-            span.style.transformOrigin = '0 0'
-            span.style.pointerEvents = 'auto'
-            span.style.userSelect = 'text'
-            span.style.cursor = 'text'
-            span.style.margin = '0'
-            span.style.padding = '0'
-            span.style.border = 'none'
-            span.className = 'text-item'
-
-            textLayer.appendChild(span)
-        })
-
-        pageInfo.textContent = `Page ${pageNumber} / ${pdfDoc.numPages}`
-        loader.classList.add("hidden")
-        await loadHighlights()
+    const deleteHighlightById = async (highlightId) => {
+        try {
+            await api.deleteHighlight(highlightId)
+            showStatus("Highlight removed.", "success")
+            await loadHighlights()
+            renderHighlightList()
+        } catch (error) {
+            showStatus(error.message || "Could not delete highlight.", "error")
+        }
     }
 
     const loadHighlights = async () => {
         highlightLayer.innerHTML = ""
-        const highlights = await api.getHighlights(window.PAPER_ID)
-        highlights.forEach((highlight) => {
+        allHighlights = await api.getHighlights(window.PAPER_ID)
+        allHighlights.forEach((highlight) => {
             if (highlight.page_number !== currentPage) return
-            highlightLayer.appendChild(createOverlay(highlight))
+            highlightLayer.appendChild(
+                createHighlightFragments(highlight, {
+                    onClickDelete: manageHighlightsMode ? () => deleteHighlightById(highlight.id) : null,
+                }),
+            )
         })
+        if (!listPanel.classList.contains("hidden")) renderHighlightList()
     }
 
-    const extractSelectedText = () => {
-        const selection = window.getSelection()
-        if (!selection || selection.rangeCount === 0) {
-            return ""
-        }
-        const range = selection.getRangeAt(0)
-        const rects = Array.from(range.getClientRects())
-        if (!rects.length) {
-            return selection.toString().trim()
+    const syncLayerDimensions = (viewport) => {
+        const cssWidth = `${viewport.width}px`
+        const cssHeight = `${viewport.height}px`
+        pdfContainer.style.width = cssWidth
+        pdfContainer.style.height = cssHeight
+        textLayer.style.width = cssWidth
+        textLayer.style.height = cssHeight
+        highlightLayer.style.width = cssWidth
+        highlightLayer.style.height = cssHeight
+    }
+
+    const renderPage = async (pageNumber) => {
+        window.getSelection()?.removeAllRanges()
+        selectedBox = null
+        isPageRendering = true
+
+        if (activeTextLayerTask?.cancel) {
+            activeTextLayerTask.cancel()
+            activeTextLayerTask = null
         }
 
-        const spans = Array.from(textLayer.querySelectorAll('span'))
-            .filter((span) => {
-                const rect = span.getBoundingClientRect()
-                return rects.some((r) =>
-                    rect.left < r.right && r.left < rect.right && rect.top < r.bottom && r.top < rect.bottom
-                )
+        pageTextDivs = []
+        pageTextContentItemsStr = []
+        pageTextItems = []
+
+        try {
+            const page = await pdfDoc.getPage(pageNumber)
+            const viewport = page.getViewport({ scale: pageScale })
+            const outputRatio = getOutputRatio()
+            const context = canvas.getContext("2d")
+
+            // HiDPI canvas backing store; CSS size stays in viewport pixels (plan-09).
+            canvas.width = Math.floor(viewport.width * outputRatio)
+            canvas.height = Math.floor(viewport.height * outputRatio)
+            canvas.style.width = `${viewport.width}px`
+            canvas.style.height = `${viewport.height}px`
+
+            const renderTransform =
+                outputRatio !== 1 ? [outputRatio, 0, 0, outputRatio, 0, 0] : null
+
+            await page.render({
+                canvasContext: context,
+                viewport,
+                transform: renderTransform,
+            }).promise
+
+            syncLayerDimensions(viewport)
+
+            textLayer.innerHTML = ""
+            textLayer.className = "textLayer"
+            textLayer.style.setProperty("--scale-factor", String(viewport.scale))
+
+            const textContent = await page.getTextContent()
+            pageTextItems = textContent.items || []
+
+            if (typeof pdfjsLib.renderTextLayer !== "function") {
+                loader.textContent = "PDF.js text layer API is unavailable."
+                return
+            }
+
+            pageTextDivs = []
+            pageTextContentItemsStr = []
+            activeTextLayerTask = pdfjsLib.renderTextLayer({
+                textContentSource: textContent,
+                container: textLayer,
+                viewport,
+                textDivs: pageTextDivs,
+                textContentItemsStr: pageTextContentItemsStr,
             })
-            .sort((a, b) => {
-                const rectA = a.getBoundingClientRect()
-                const rectB = b.getBoundingClientRect()
-                const topDiff = rectA.top - rectB.top
-                if (Math.abs(topDiff) > 3) {
-                    return topDiff
-                }
-                return rectA.left - rectB.left
-            })
-        const text = spans.map((span) => span.textContent).join("").trim()
-        return text || selection.toString().trim()
+            await activeTextLayerTask.promise
+
+            pageInfo.textContent = `Page ${pageNumber} / ${pdfDoc.numPages}`
+            loader.classList.add("hidden")
+            await loadHighlights()
+        } finally {
+            isPageRendering = false
+        }
     }
 
     const captureSelection = () => {
+        if (isPageRendering || !selectionAnchoredIn(textLayer)) {
+            selectedBox = null
+            return
+        }
+
         const selection = window.getSelection()
-        if (!selection || selection.rangeCount === 0) {
-            selectedBox = null
-            return
-        }
         const range = selection.getRangeAt(0)
-        const rect = range.getBoundingClientRect()
-        const containerRect = pdfContainer.getBoundingClientRect()
-        if (!rect.width || !rect.height) {
+        const rects = captureNormalizedRects(range, textLayer, pageTextDivs)
+        const bounds = unionNormalizedRects(rects)
+        const text = extractTextFromTextDivs(
+            range,
+            pageTextDivs,
+            pageTextContentItemsStr,
+            pageTextItems,
+        )
+
+        if (!bounds || bounds.width <= 0 || bounds.height <= 0 || !text || !rects.length) {
             selectedBox = null
             return
         }
+
         selectedBox = {
-            x: (rect.left - containerRect.left) / containerRect.width,
-            y: (rect.top - containerRect.top) / containerRect.height,
-            width: rect.width / containerRect.width,
-            height: rect.height / containerRect.height,
-            selected_text: extractSelectedText(),
+            ...bounds,
+            rects,
+            selected_text: text,
             page_number: currentPage,
-            color: "rgba(253, 230, 138, 0.45)",
+            color: selectedHighlightColor,
         }
     }
 
@@ -456,11 +1055,20 @@ async function initViewerPage() {
             await api.saveHighlight(window.PAPER_ID, selectedBox)
             showStatus("Highlight saved.", "success")
             await loadHighlights()
+            renderHighlightList()
             window.getSelection().removeAllRanges()
             selectedBox = null
         } catch (error) {
             showStatus(error.message || "Could not save highlight.", "error")
         }
+    })
+
+    manageToggle.addEventListener("click", () => {
+        manageHighlightsMode = !manageHighlightsMode
+        highlightLayer.classList.toggle("manage-mode", manageHighlightsMode)
+        listPanel.classList.toggle("hidden", !manageHighlightsMode)
+        manageToggle.textContent = manageHighlightsMode ? "Done managing" : "Manage highlights"
+        loadHighlights()
     })
 
     dom.$("#prev-page").addEventListener("click", () => {
@@ -477,15 +1085,24 @@ async function initViewerPage() {
     pdfContainer.addEventListener("mouseup", captureSelection)
     pdfContainer.addEventListener("keyup", captureSelection)
 
-    pdfDoc = await pdfjsLib.getDocument(documentUrl).promise
-    await renderPage(currentPage)
+    // Keep selectedBox in sync when the user clicks Save without another mouseup (plan-08).
+    let selectionChangeTimer = null
+    document.addEventListener("selectionchange", () => {
+        if (isPageRendering) return
+        clearTimeout(selectionChangeTimer)
+        selectionChangeTimer = setTimeout(captureSelection, 40)
+    })
+
+    try {
+        pdfDoc = await pdfjsLib.getDocument(documentUrl).promise
+        await renderPage(currentPage)
+    } catch (error) {
+        loader.textContent = "Could not load this PDF."
+        loader.classList.remove("hidden")
+    }
 }
 
 window.addEventListener("DOMContentLoaded", () => {
-    if (dom.$("#drop-zone")) {
-        initIndexPage()
-    }
-    if (dom.$("#pdf-canvas")) {
-        initViewerPage()
-    }
+    if (dom.$("#drop-zone")) initIndexPage()
+    if (dom.$("#pdf-canvas")) initViewerPage()
 })

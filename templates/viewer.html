@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Viewer - {{ paper.title }}</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/web/pdf_viewer.css" />
 </head>
 <body>
   <div class="viewer-shell">
@@ -20,25 +21,33 @@
     </header>
 
     <section class="viewer-controls">
-      <button id="prev-page" class="secondary-button">Previous</button>
+      <button id="prev-page" class="secondary-button" type="button">Previous</button>
       <span id="page-info">Page 1</span>
-      <button id="next-page" class="secondary-button">Next</button>
-      <button id="save-highlight" class="primary-button">Save Highlight</button>
+      <button id="next-page" class="secondary-button" type="button">Next</button>
+      <button id="save-highlight" class="primary-button" type="button">Save Highlight</button>
+      <div id="highlight-color-picker" class="highlight-color-picker" aria-label="Highlight colour"></div>
+      <button id="toggle-highlight-manage" class="secondary-button" type="button">Manage highlights</button>
       <span id="status-message" class="status"></span>
-      <span class="hint">Select text in the viewer to capture a highlight.</span>
+      <span class="hint">Select text, pick a colour, then save. Use Manage highlights to delete.</span>
     </section>
+
+    <div id="highlight-list-panel" class="highlight-list-panel hidden">
+      <h3>Highlights on this page</h3>
+      <ul id="highlight-list" class="highlight-list"></ul>
+    </div>
 
     <div id="pdf-viewer" class="pdf-viewer">
       <div id="viewer-loader">Loading PDF…</div>
       <div id="pdf-container" class="pdf-container">
         <canvas id="pdf-canvas"></canvas>
-        <div id="text-layer" class="text-layer"></div>
+        <div id="text-layer" class="textLayer" aria-hidden="false"></div>
         <div id="highlight-layer" class="highlight-layer"></div>
       </div>
     </div>
   </div>
 
-  <script src="https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.min.js"></script>
+  <!-- pdfjs-dist on jsDelivr (plan-06); must load before main.js -->
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
   <script src="/static/main.js"></script>
   <script>
     window.PAPER_ID = {{ paper.id }};
