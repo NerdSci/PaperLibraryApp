@@ -41,29 +41,28 @@ function findTextDivIndex(node, textDivs) {
 }
 
 /**
- * Plan-09: extract text using PDF.js textDiv order (reading order for typical PDFs).
+ * Plan-10: selected text from the browser range (matches visible selection).
+ * Falls back to textDiv indices only when toString() is empty on the PDF layer.
  */
-function extractTextFromTextDivs(range, textDivs, textContentItemsStr, textItems) {
+function extractSelectedText(range, textDivs, textContentItemsStr, textItems) {
     if (!range || range.collapsed) return ""
+
+    const direct = range.toString().replace(/\s+/g, " ").trim()
+    if (direct) return direct
 
     const startIdx = findTextDivIndex(range.startContainer, textDivs)
     const endIdx = findTextDivIndex(range.endContainer, textDivs)
-    if (startIdx < 0 || endIdx < 0) {
-        return range.toString().trim()
-    }
+    if (startIdx < 0 || endIdx < 0) return ""
 
     const lo = Math.min(startIdx, endIdx)
     const hi = Math.max(startIdx, endIdx)
-    let parts = []
+    const parts = []
     for (let i = lo; i <= hi; i++) {
         const chunk = textContentItemsStr[i] ?? textDivs[i]?.textContent ?? ""
         if (chunk) parts.push(chunk)
-        const item = textItems?.[i]
-        if (item?.hasEOL && i < hi) parts.push(" ")
+        if (textItems?.[i]?.hasEOL && i < hi) parts.push(" ")
     }
-
-    const joined = parts.join("").replace(/[ \t]+/g, " ").trim()
-    return joined || range.toString().trim()
+    return parts.join("").replace(/[ \t]+/g, " ").trim()
 }
 
 /** Convert a viewport client rect to normalized 0–1 coords against a reference element. */
@@ -95,43 +94,21 @@ function unionNormalizedRects(rects) {
 }
 
 /**
- * Plan-09: one rect per selection line from getClientRects; fallback to intersecting text divs.
+ * Plan-10: overlay geometry from selection quads only (never full PDF.js textDiv boxes).
  */
-function captureNormalizedRects(range, referenceEl, textDivs) {
+function captureNormalizedRects(range, referenceEl) {
     const ref = referenceEl.getBoundingClientRect()
     if (!ref.width || !ref.height) return []
 
-    const clientRects = Array.from(range.getClientRects()).filter((r) => r.width > 0.5 || r.height > 0.5)
-    let rects = clientRects
+    const rects = Array.from(range.getClientRects())
+        .filter((r) => r.width > 0.5 || r.height > 0.5)
         .map((r) => normalizeClientRect(r, referenceEl))
         .filter(Boolean)
 
-    if (textDivs?.length) {
-        const rangeRects = Array.from(range.getClientRects())
-        const divRects = []
-        for (const div of textDivs) {
-            const divRect = div.getBoundingClientRect()
-            const hits = rangeRects.some(
-                (r) =>
-                    divRect.left < r.right &&
-                    r.left < divRect.right &&
-                    divRect.top < r.bottom &&
-                    r.top < divRect.bottom,
-            )
-            if (hits) {
-                const normalized = normalizeClientRect(divRect, referenceEl)
-                if (normalized) divRects.push(normalized)
-            }
-        }
-        if (divRects.length) rects = divRects
-    }
+    if (rects.length) return rects
 
-    if (!rects.length) {
-        const fallback = normalizeClientRect(range.getBoundingClientRect(), referenceEl)
-        if (fallback) rects = [fallback]
-    }
-
-    return rects
+    const fallback = normalizeClientRect(range.getBoundingClientRect(), referenceEl)
+    return fallback ? [fallback] : []
 }
 
 /** Parse stored highlight geometry (multi-rect or legacy single box). */
@@ -1023,9 +1000,9 @@ async function initViewerPage() {
 
         const selection = window.getSelection()
         const range = selection.getRangeAt(0)
-        const rects = captureNormalizedRects(range, textLayer, pageTextDivs)
+        const rects = captureNormalizedRects(range, textLayer)
         const bounds = unionNormalizedRects(rects)
-        const text = extractTextFromTextDivs(
+        const text = extractSelectedText(
             range,
             pageTextDivs,
             pageTextContentItemsStr,
