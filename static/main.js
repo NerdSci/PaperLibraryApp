@@ -838,6 +838,16 @@ async function initViewerPage() {
     let pageTextContentItemsStr = []
     let pageTextItems = []
     let isPageRendering = false
+    let viewerHasRenderedPage = false
+
+    const showViewerLoader = (message = "Loading PDF…") => {
+        loader.textContent = message
+        loader.classList.remove("hidden")
+    }
+
+    const hideViewerLoader = () => {
+        loader.classList.add("hidden")
+    }
 
     if (typeof pdfjsLib === "undefined") {
         loader.textContent =
@@ -928,6 +938,7 @@ async function initViewerPage() {
         window.getSelection()?.removeAllRanges()
         selectedBox = null
         isPageRendering = true
+        showViewerLoader(viewerHasRenderedPage ? "Loading page…" : "Loading PDF…")
 
         if (activeTextLayerTask?.cancel) {
             activeTextLayerTask.cancel()
@@ -969,7 +980,7 @@ async function initViewerPage() {
             pageTextItems = textContent.items || []
 
             if (typeof pdfjsLib.renderTextLayer !== "function") {
-                loader.textContent = "PDF.js text layer API is unavailable."
+                showViewerLoader("PDF.js text layer API is unavailable.")
                 return
             }
 
@@ -985,7 +996,8 @@ async function initViewerPage() {
             await activeTextLayerTask.promise
 
             pageInfo.textContent = `Page ${pageNumber} / ${pdfDoc.numPages}`
-            loader.classList.add("hidden")
+            hideViewerLoader()
+            viewerHasRenderedPage = true
             await loadHighlights()
         } finally {
             isPageRendering = false
@@ -1074,8 +1086,7 @@ async function initViewerPage() {
         pdfDoc = await pdfjsLib.getDocument(documentUrl).promise
         await renderPage(currentPage)
     } catch (error) {
-        loader.textContent = "Could not load this PDF."
-        loader.classList.remove("hidden")
+        showViewerLoader("Could not load this PDF.")
     }
 }
 

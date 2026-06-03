@@ -512,12 +512,35 @@ body.page-drag-active .drop-zone {
   margin-bottom: 18px;
 }
 
+.viewer-actions {
+  min-width: -webkit-fill-available;
+  min-width: fit-content;
+}
+
 .pdf-viewer {
+  position: relative;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
   padding: 20px;
+}
+
+#viewer-loader {
+  position: absolute;
+  inset: 20px;
+  z-index: 5;
+  display: grid;
+  place-items: center;
+  background: rgba(248, 250, 252, 0.92);
+  border-radius: calc(var(--radius) - 4px);
+  color: var(--muted);
+  font-weight: 500;
+  pointer-events: none;
+}
+
+#viewer-loader.hidden {
+  display: none;
 }
 
 #pdf-container {
