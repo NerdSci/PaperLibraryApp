@@ -2,4 +2,4 @@
 .venv/
 /docs/
 /ui_guide/
-/data/
+/data/*
