@@ -222,6 +222,7 @@ const indexState = {
     selectedPaperIds: new Set(),
     editingPaperId: null,
     tagEditorTargetIds: null,
+    tagEditorAnchorEl: null,
     uploadInProgress: false,
     dragDepth: 0,
 }
@@ -473,6 +474,7 @@ function clearPaperSelection() {
 }
 
 async function renderLibrary(query = "", tagId = null, source = null) {
+    closeTagEditor()
     const papers = await api.getPapers(query, tagId, source)
     const container = dom.$("#library-list")
     container.innerHTML = ""
@@ -536,7 +538,12 @@ async function renderLibrary(query = "", tagId = null, source = null) {
         setButtonLabel(editTagsBtn, "sell", "Edit tags")
         editTagsBtn.addEventListener("click", (event) => {
             event.preventDefault()
-            openTagEditor(paper.id, paper.tags.map((t) => t.id), editTagsBtn)
+            event.stopPropagation()
+            void openTagEditor(
+                paper.id,
+                paper.tags.map((t) => t.id),
+                event.currentTarget
+            )
         })
 
         tagsRow.appendChild(chipsWrap)
@@ -601,33 +608,112 @@ async function loadLibrary(query = "", tagId = undefined, source = undefined) {
     updateBulkBar()
 }
 
-function closeTagEditor() {
+let tagEditorRepositionHandler = null
+
+function unbindTagEditorReposition() {
+    if (!tagEditorRepositionHandler) return
+    window.removeEventListener("scroll", tagEditorRepositionHandler, true)
+    window.removeEventListener("resize", tagEditorRepositionHandler)
+    tagEditorRepositionHandler = null
+}
+
+function bindTagEditorReposition(anchorEl) {
+    unbindTagEditorReposition()
     const popover = dom.$("#tag-editor-popover")
-    if (popover) popover.classList.add("hidden")
+    if (!popover || !anchorEl) return
+    tagEditorRepositionHandler = () => {
+        if (popover.classList.contains("hidden")) return
+        if (!anchorEl.isConnected) {
+            closeTagEditor()
+            return
+        }
+        positionTagEditorPopover(popover, anchorEl)
+    }
+    window.addEventListener("scroll", tagEditorRepositionHandler, true)
+    window.addEventListener("resize", tagEditorRepositionHandler)
+}
+
+/** Position the tag popover in the viewport (fixed; do not add scroll offsets). */
+function positionTagEditorPopover(popover, anchorEl) {
+    const margin = 8
+    const viewportPad = 12
+    const anchorRect = anchorEl.getBoundingClientRect()
+
+    popover.classList.remove("hidden")
+    popover.style.visibility = "hidden"
+
+    const popW = popover.offsetWidth
+    const popH = popover.offsetHeight
+
+    let top = anchorRect.bottom + margin
+    let left = anchorRect.left
+
+    if (top + popH > window.innerHeight - viewportPad) {
+        const aboveTop = anchorRect.top - popH - margin
+        if (aboveTop >= viewportPad) {
+            top = aboveTop
+        } else {
+            top = Math.max(viewportPad, window.innerHeight - popH - viewportPad)
+        }
+    }
+
+    if (left + popW > window.innerWidth - viewportPad) {
+        left = window.innerWidth - popW - viewportPad
+    }
+    if (left < viewportPad) {
+        left = viewportPad
+    }
+
+    popover.style.top = `${top}px`
+    popover.style.left = `${left}px`
+    popover.style.visibility = ""
+}
+
+function closeTagEditor() {
+    unbindTagEditorReposition()
+    const popover = dom.$("#tag-editor-popover")
+    if (popover) {
+        popover.classList.add("hidden")
+        popover.style.visibility = ""
+        popover.style.top = ""
+        popover.style.left = ""
+    }
     indexState.editingPaperId = null
     indexState.tagEditorTargetIds = null
+    indexState.tagEditorAnchorEl = null
 }
 
 async function openTagEditor(paperIdOrIds, assignedTagIds, anchorEl) {
+    const popover = dom.$("#tag-editor-popover")
+    const options = dom.$("#tag-editor-options")
+    if (!popover || !options || !anchorEl) return
+
+    if (
+        !popover.classList.contains("hidden") &&
+        indexState.tagEditorAnchorEl === anchorEl
+    ) {
+        closeTagEditor()
+        return
+    }
+
     const paperIds = Array.isArray(paperIdOrIds) ? paperIdOrIds : [paperIdOrIds]
     indexState.tagEditorTargetIds = paperIds
     indexState.editingPaperId = paperIds.length === 1 ? paperIds[0] : null
+    indexState.tagEditorAnchorEl = anchorEl
 
     const tags = await ensureTagsCached()
-    const popover = dom.$("#tag-editor-popover")
-    const options = dom.$("#tag-editor-options")
     const title = popover.querySelector(".tag-editor-title")
     title.textContent = paperIds.length > 1 ? `Tags for ${paperIds.length} papers` : "Tags for this paper"
 
     options.innerHTML = ""
-    const selectedSet = new Set(assignedTagIds)
+    const selectedSet = new Set(assignedTagIds.map((id) => Number(id)))
 
     tags.forEach((tag) => {
         const label = document.createElement("label")
         label.className = "tag-editor-option"
         const input = document.createElement("input")
         input.type = "checkbox"
-        input.checked = selectedSet.has(tag.id)
+        input.checked = selectedSet.has(Number(tag.id))
         input.dataset.tagId = String(tag.id)
         const dot = document.createElement("span")
         dot.className = "tag-dot"
@@ -660,10 +746,8 @@ async function openTagEditor(paperIdOrIds, assignedTagIds, anchorEl) {
         options.appendChild(label)
     })
 
-    const rect = anchorEl.getBoundingClientRect()
-    popover.classList.remove("hidden")
-    popover.style.top = `${rect.bottom + window.scrollY + 8}px`
-    popover.style.left = `${Math.min(rect.left + window.scrollX, window.innerWidth - 300)}px`
+    positionTagEditorPopover(popover, anchorEl)
+    bindTagEditorReposition(anchorEl)
 }
 
 function isPdfFile(file) {
@@ -811,11 +895,12 @@ function activateSearchFilterPanel() {
 }
 
 function activateBulkActions() {
-    dom.$("#bulk-apply-tags")?.addEventListener("click", () => {
+    dom.$("#bulk-apply-tags")?.addEventListener("click", (event) => {
+        event.preventDefault()
+        event.stopPropagation()
         const ids = Array.from(indexState.selectedPaperIds)
         if (ids.length === 0) return
-        const anchor = dom.$("#bulk-apply-tags")
-        openTagEditor(ids, [], anchor)
+        void openTagEditor(ids, [], event.currentTarget)
     })
     dom.$("#bulk-clear-selection")?.addEventListener("click", clearPaperSelection)
 
@@ -945,7 +1030,11 @@ async function initIndexPage() {
     document.addEventListener("click", (event) => {
         const popover = dom.$("#tag-editor-popover")
         if (!popover || popover.classList.contains("hidden")) return
-        if (popover.contains(event.target) || event.target.closest(".edit-tags-button") || event.target.closest("#bulk-apply-tags")) {
+        if (
+            popover.contains(event.target) ||
+            event.target.closest(".edit-tags-button") ||
+            event.target.closest("#bulk-apply-tags")
+        ) {
             return
         }
         closeTagEditor()

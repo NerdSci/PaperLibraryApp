@@ -23,6 +23,12 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50MB upload limit
 
 
+@app.context_processor
+def inject_current_year():
+    """Expose the current calendar year for copyright notices in templates."""
+    return {"current_year": datetime.datetime.now().year}
+
+
 def get_db():
     """Return a database connection for the current request context."""
     if "db" not in g:
