@@ -272,6 +272,16 @@ function setPageInfo(el, pageNumber, totalPages) {
     el.appendChild(text)
 }
 
+function updateViewerPager(pageNumber, totalPages) {
+    dom.$all(".pager-info").forEach((el) => setPageInfo(el, pageNumber, totalPages))
+    dom.$all(".pager-prev").forEach((btn) => {
+        btn.disabled = pageNumber <= 1
+    })
+    dom.$all(".pager-next").forEach((btn) => {
+        btn.disabled = !totalPages || pageNumber >= totalPages
+    })
+}
+
 const TOAST_AUTO_DISMISS_MS = 4500
 const ARXIV_RATE_LIMIT_RE = /rate-limit/i
 
@@ -1096,7 +1106,6 @@ async function initViewerPage() {
     const textLayer = dom.$("#text-layer")
     const highlightLayer = dom.$("#highlight-layer")
     const loader = dom.$("#viewer-loader")
-    const pageInfo = dom.$("#page-info")
     const pdfContainer = dom.$("#pdf-container")
     const saveButton = dom.$("#save-highlight")
     const colorPicker = dom.$("#highlight-color-picker")
@@ -1275,7 +1284,7 @@ async function initViewerPage() {
             })
             await activeTextLayerTask.promise
 
-            setPageInfo(pageInfo, pageNumber, pdfDoc.numPages)
+            updateViewerPager(pageNumber, pdfDoc.numPages)
             hideViewerLoader()
             viewerHasRenderedPage = true
             await loadHighlights()
@@ -1344,16 +1353,18 @@ async function initViewerPage() {
         loadHighlights()
     })
 
-    dom.$("#prev-page").addEventListener("click", () => {
+    const goToPrevPage = () => {
         if (currentPage <= 1) return
         currentPage -= 1
         renderPage(currentPage)
-    })
-    dom.$("#next-page").addEventListener("click", () => {
-        if (currentPage >= pdfDoc.numPages) return
+    }
+    const goToNextPage = () => {
+        if (!pdfDoc || currentPage >= pdfDoc.numPages) return
         currentPage += 1
         renderPage(currentPage)
-    })
+    }
+    dom.$all(".pager-prev").forEach((btn) => btn.addEventListener("click", goToPrevPage))
+    dom.$all(".pager-next").forEach((btn) => btn.addEventListener("click", goToNextPage))
 
     pdfContainer.addEventListener("mouseup", captureSelection)
     pdfContainer.addEventListener("keyup", captureSelection)

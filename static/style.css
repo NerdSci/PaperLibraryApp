@@ -885,6 +885,27 @@ body.page-drag-active .drop-zone {
   margin-bottom: 18px;
 }
 
+.viewer-controls--bottom {
+  justify-content: center;
+  margin-top: 16px;
+  margin-bottom: 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.viewer-pager {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.pager-prev:disabled,
+.pager-next:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .page-info {
   display: inline-flex;
   align-items: center;

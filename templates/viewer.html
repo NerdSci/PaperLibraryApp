@@ -28,18 +28,7 @@
     </header>
 
     <section class="viewer-controls">
-      <button id="prev-page" class="secondary-button btn-with-icon" type="button">
-        <span class="material-symbols-outlined btn-icon" aria-hidden="true">chevron_left</span>
-        <span class="btn-label">Previous</span>
-      </button>
-      <span id="page-info" class="page-info">
-        <span class="material-symbols-outlined page-info__icon" aria-hidden="true">description</span>
-        Page 1
-      </span>
-      <button id="next-page" class="secondary-button btn-with-icon" type="button">
-        <span class="btn-label">Next</span>
-        <span class="material-symbols-outlined btn-icon" aria-hidden="true">chevron_right</span>
-      </button>
+      {% include 'includes/viewer-pager.html' %}
       <button id="save-highlight" class="primary-button btn-with-icon" type="button">
         <span class="material-symbols-outlined btn-icon" aria-hidden="true">highlight</span>
         <span class="btn-label">Save Highlight</span>
@@ -72,6 +61,10 @@
         <div id="highlight-layer" class="highlight-layer"></div>
       </div>
     </div>
+
+    <section class="viewer-controls viewer-controls--bottom" aria-label="PDF page navigation (bottom)">
+      {% include 'includes/viewer-pager.html' %}
+    </section>
   </div>
 
   {% include 'includes/footer.html' %}
