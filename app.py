@@ -558,6 +558,19 @@ def hf_search():
         normalized = _normalize_hf_paper_entry(item)
         if normalized and normalized.get("arxiv_id"):
             simplified.append(normalized)
+
+    if simplified:
+        arxiv_ids = [entry["arxiv_id"] for entry in simplified]
+        placeholders = ",".join("?" * len(arxiv_ids))
+        db = get_db()
+        rows = db.execute(
+            f"SELECT arxiv_id FROM papers WHERE arxiv_id IN ({placeholders})",
+            arxiv_ids,
+        ).fetchall()
+        imported_ids = {row["arxiv_id"] for row in rows}
+        for entry in simplified:
+            entry["already_imported"] = entry["arxiv_id"] in imported_ids
+
     return jsonify(simplified)
 
 

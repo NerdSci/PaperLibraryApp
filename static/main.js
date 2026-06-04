@@ -725,24 +725,42 @@ async function doHfSearch(query, resultsContainer) {
             const importButton = document.createElement("button")
             importButton.type = "button"
             importButton.className = "primary-button"
-            importButton.textContent = "Import"
-            importButton.disabled = !item.arxiv_id
+            const markImported = () => {
+                item.already_imported = true
+                card.classList.add("hf-result--imported")
+                if (!card.querySelector(".hf-imported-badge")) {
+                    const badge = document.createElement("div")
+                    badge.className = "hf-imported-badge"
+                    badge.textContent = "Already in library"
+                    card.insertBefore(badge, importButton)
+                }
+                importButton.disabled = true
+                importButton.textContent = "Imported"
+            }
+
             importButton.addEventListener("click", async () => {
-                if (!item.arxiv_id) return
+                if (!item.arxiv_id || item.already_imported) return
                 importButton.disabled = true
                 importButton.textContent = "Importing…"
                 try {
                     await api.hfImport(item.arxiv_id)
+                    markImported()
                     showStatus("Imported paper from Hugging Face.", "success")
                     loadLibrary(dom.$("#search-input").value.trim())
                 } catch (err) {
                     showStatus(err.message || "Import failed.", "error")
-                } finally {
                     importButton.disabled = false
                     importButton.textContent = "Import"
                 }
             })
             card.appendChild(importButton)
+
+            if (item.already_imported) {
+                markImported()
+            } else {
+                importButton.textContent = "Import"
+                importButton.disabled = !item.arxiv_id
+            }
             resultsContainer.appendChild(card)
         })
     } catch (error) {
