@@ -161,6 +161,9 @@ const api = {
         return api.fetchJson(`/api/papers?${params.toString()}`)
     },
 
+    deletePaper: async (paperId) =>
+        api.fetchJson(`/api/papers/${paperId}`, { method: "DELETE" }),
+
     getTags: async () => api.fetchJson("/api/tags"),
 
     uploadPdf: async (file) => {
@@ -229,16 +232,162 @@ function escapeHtml(text) {
     return div.innerHTML
 }
 
-function showStatus(message, type = "info") {
-    const status = dom.$("#status-message")
-    if (!status) return
-    status.textContent = message
-    status.className = `status ${type}`
-    if (type !== "error") {
-        setTimeout(() => {
-            status.textContent = ""
-            status.className = "status"
-        }, 4000)
+/** Google Material Symbols icon (see templates/includes/fonts.html). */
+function icon(name, extraClass = "") {
+    const el = document.createElement("span")
+    el.className = extraClass
+        ? `material-symbols-outlined ${extraClass}`
+        : "material-symbols-outlined"
+    el.textContent = name
+    el.setAttribute("aria-hidden", "true")
+    return el
+}
+
+function setButtonLabel(btn, iconName, label) {
+    btn.replaceChildren()
+    btn.appendChild(icon(iconName, "btn-icon"))
+    const text = document.createElement("span")
+    text.className = "btn-label"
+    text.textContent = label
+    btn.appendChild(text)
+}
+
+function setLinkLabel(link, iconName, label) {
+    link.replaceChildren()
+    link.appendChild(icon(iconName, "btn-icon"))
+    const text = document.createElement("span")
+    text.className = "btn-label"
+    text.textContent = label
+    link.appendChild(text)
+}
+
+function setPageInfo(el, pageNumber, totalPages) {
+    if (!el) return
+    el.replaceChildren()
+    el.appendChild(icon("description", "page-info__icon"))
+    const text = document.createElement("span")
+    text.className = "page-info__text"
+    text.textContent = `Page ${pageNumber} / ${totalPages}`
+    el.appendChild(text)
+}
+
+const TOAST_AUTO_DISMISS_MS = 4500
+const ARXIV_RATE_LIMIT_RE = /rate-limit/i
+
+let statusDismissTimer = null
+let activeToast = null
+
+function getToastContainer() {
+    let container = dom.$("#toast-container")
+    if (!container) {
+        container = document.createElement("div")
+        container.id = "toast-container"
+        container.className = "toast-container"
+        container.setAttribute("aria-live", "polite")
+        document.body.appendChild(container)
+    }
+    return container
+}
+
+function clearStatusDismissTimer() {
+    if (statusDismissTimer) {
+        clearTimeout(statusDismissTimer)
+        statusDismissTimer = null
+    }
+}
+
+function removeToastImmediate(alertEl) {
+    clearStatusDismissTimer()
+    if (!alertEl) return
+    if (activeToast === alertEl) activeToast = null
+    alertEl.remove()
+}
+
+function dismissToast(alertEl) {
+    if (!alertEl?.isConnected) return
+    if (activeToast === alertEl) activeToast = null
+    clearStatusDismissTimer()
+    alertEl.classList.remove("toast-alert--visible")
+    alertEl.classList.add("toast-alert--leaving")
+    const remove = () => alertEl.remove()
+    alertEl.addEventListener("transitionend", remove, { once: true })
+    setTimeout(remove, 280)
+}
+
+function parseToastContent(message, type) {
+    if (ARXIV_RATE_LIMIT_RE.test(message)) {
+        return {
+            toastType: "warning",
+            title: "arXiv is rate-limiting requests",
+            message: "Wait a minute, then try Import again.",
+            icon: "schedule",
+        }
+    }
+    const icons = {
+        success: "check_circle",
+        error: "error",
+        warning: "warning",
+        info: "info",
+    }
+    return {
+        toastType: type,
+        title: null,
+        message,
+        icon: icons[type] || icons.info,
+    }
+}
+
+function showStatus(message, type = "info", options = {}) {
+    const legacy = dom.$("#status-message")
+    if (legacy) {
+        legacy.textContent = ""
+        legacy.className = "status"
+    }
+
+    if (!message) {
+        if (activeToast) removeToastImmediate(activeToast)
+        return
+    }
+
+    if (activeToast) removeToastImmediate(activeToast)
+
+    const { toastType, title, message: bodyText, icon: iconName } = parseToastContent(message, type)
+    const autoDismiss = options.autoDismiss ?? type !== "info"
+    const autoDismissMs = options.autoDismissMs ?? TOAST_AUTO_DISMISS_MS
+
+    const alert = document.createElement("div")
+    alert.className = `toast-alert toast-alert--${toastType}`
+    alert.setAttribute("role", "alert")
+
+    const iconEl = icon(iconName, "toast-alert__icon")
+
+    const body = document.createElement("div")
+    body.className = "toast-alert__body"
+    if (title) {
+        const titleEl = document.createElement("div")
+        titleEl.className = "toast-alert__title"
+        titleEl.textContent = title
+        body.appendChild(titleEl)
+    }
+    const textEl = document.createElement("p")
+    textEl.className = "toast-alert__message"
+    textEl.textContent = bodyText
+    body.appendChild(textEl)
+
+    const dismissBtn = document.createElement("button")
+    dismissBtn.type = "button"
+    dismissBtn.className = "toast-alert__dismiss icon-button"
+    dismissBtn.setAttribute("aria-label", "Dismiss notification")
+    dismissBtn.appendChild(icon("close"))
+    dismissBtn.addEventListener("click", () => dismissToast(alert))
+
+    alert.append(iconEl, body, dismissBtn)
+    getToastContainer().appendChild(alert)
+    activeToast = alert
+    requestAnimationFrame(() => alert.classList.add("toast-alert--visible"))
+
+    if (autoDismiss) {
+        statusDismissTimer = setTimeout(() => dismissToast(alert), autoDismissMs)
     }
 }
 
@@ -277,7 +426,7 @@ async function renderTags(selectedTag) {
     const allTag = document.createElement("button")
     allTag.type = "button"
     allTag.className = selectedTag ? "tag-chip" : "tag-chip active"
-    allTag.textContent = "All"
+    setButtonLabel(allTag, "grid_view", "All")
     allTag.addEventListener("click", () => {
         clearPaperSelection()
         loadLibrary(dom.$("#search-input").value.trim(), null)
@@ -383,8 +532,8 @@ async function renderLibrary(query = "", tagId = null, source = null) {
 
         const editTagsBtn = document.createElement("button")
         editTagsBtn.type = "button"
-        editTagsBtn.className = "secondary-button edit-tags-button"
-        editTagsBtn.textContent = "Edit tags"
+        editTagsBtn.className = "secondary-button edit-tags-button btn-with-icon"
+        setButtonLabel(editTagsBtn, "sell", "Edit tags")
         editTagsBtn.addEventListener("click", (event) => {
             event.preventDefault()
             openTagEditor(paper.id, paper.tags.map((t) => t.id), editTagsBtn)
@@ -400,10 +549,31 @@ async function renderLibrary(query = "", tagId = null, source = null) {
         const actions = document.createElement("div")
         actions.className = "paper-actions"
         const pdfLink = document.createElement("a")
-        pdfLink.className = "pdf-link"
+        pdfLink.className = "pdf-link btn-with-icon"
         pdfLink.href = `/viewer/${paper.id}`
-        pdfLink.textContent = "PDF"
+        setLinkLabel(pdfLink, "picture_as_pdf", "PDF")
+        const deleteBtn = document.createElement("button")
+        deleteBtn.type = "button"
+        deleteBtn.className = "secondary-button delete-paper-button btn-with-icon"
+        setButtonLabel(deleteBtn, "delete", "Delete")
+        deleteBtn.addEventListener("click", async () => {
+            const message =
+                `Remove "${paper.title}" from your library?\n\n` +
+                "This deletes the stored PDF and all highlights. This cannot be undone."
+            if (!window.confirm(message)) return
+            deleteBtn.disabled = true
+            try {
+                await api.deletePaper(paper.id)
+                indexState.selectedPaperIds.delete(paper.id)
+                showStatus(`Removed "${paper.title}" from the library.`, "success")
+                await loadLibrary(dom.$("#search-input").value.trim())
+            } catch (err) {
+                showStatus(err.message || "Could not delete paper.", "error")
+                deleteBtn.disabled = false
+            }
+        })
         actions.appendChild(pdfLink)
+        actions.appendChild(deleteBtn)
 
         card.appendChild(checkbox)
         card.appendChild(meta)
@@ -724,24 +894,27 @@ async function doHfSearch(query, resultsContainer) {
 
             const importButton = document.createElement("button")
             importButton.type = "button"
-            importButton.className = "primary-button"
+            importButton.className = "primary-button btn-with-icon"
             const markImported = () => {
                 item.already_imported = true
                 card.classList.add("hf-result--imported")
                 if (!card.querySelector(".hf-imported-badge")) {
                     const badge = document.createElement("div")
-                    badge.className = "hf-imported-badge"
-                    badge.textContent = "Already in library"
+                    badge.className = "hf-imported-badge btn-with-icon"
+                    badge.appendChild(icon("check_circle", "btn-icon"))
+                    const badgeText = document.createElement("span")
+                    badgeText.textContent = "Already in library"
+                    badge.appendChild(badgeText)
                     card.insertBefore(badge, importButton)
                 }
                 importButton.disabled = true
-                importButton.textContent = "Imported"
+                setButtonLabel(importButton, "check_circle", "Imported")
             }
 
             importButton.addEventListener("click", async () => {
                 if (!item.arxiv_id || item.already_imported) return
                 importButton.disabled = true
-                importButton.textContent = "Importing…"
+                setButtonLabel(importButton, "hourglass_empty", "Importing…")
                 try {
                     await api.hfImport(item.arxiv_id)
                     markImported()
@@ -750,7 +923,7 @@ async function doHfSearch(query, resultsContainer) {
                 } catch (err) {
                     showStatus(err.message || "Import failed.", "error")
                     importButton.disabled = false
-                    importButton.textContent = "Import"
+                    setButtonLabel(importButton, "download", "Import")
                 }
             })
             card.appendChild(importButton)
@@ -758,7 +931,7 @@ async function doHfSearch(query, resultsContainer) {
             if (item.already_imported) {
                 markImported()
             } else {
-                importButton.textContent = "Import"
+                setButtonLabel(importButton, "download", "Import")
                 importButton.disabled = !item.arxiv_id
             }
             resultsContainer.appendChild(card)
@@ -907,8 +1080,8 @@ async function initViewerPage() {
             snippet.textContent = highlight.selected_text || "(no text captured)"
             const del = document.createElement("button")
             del.type = "button"
-            del.className = "secondary-button highlight-delete-btn"
-            del.textContent = "Delete"
+            del.className = "secondary-button highlight-delete-btn btn-with-icon"
+            setButtonLabel(del, "delete", "Delete")
             del.addEventListener("click", () => deleteHighlightById(highlight.id))
             li.appendChild(snippet)
             li.appendChild(del)
@@ -1013,7 +1186,7 @@ async function initViewerPage() {
             })
             await activeTextLayerTask.promise
 
-            pageInfo.textContent = `Page ${pageNumber} / ${pdfDoc.numPages}`
+            setPageInfo(pageInfo, pageNumber, pdfDoc.numPages)
             hideViewerLoader()
             viewerHasRenderedPage = true
             await loadHighlights()
@@ -1074,7 +1247,11 @@ async function initViewerPage() {
         manageHighlightsMode = !manageHighlightsMode
         highlightLayer.classList.toggle("manage-mode", manageHighlightsMode)
         listPanel.classList.toggle("hidden", !manageHighlightsMode)
-        manageToggle.textContent = manageHighlightsMode ? "Done managing" : "Manage highlights"
+        setButtonLabel(
+            manageToggle,
+            manageHighlightsMode ? "done" : "checklist",
+            manageHighlightsMode ? "Done managing" : "Manage highlights"
+        )
         loadHighlights()
     })
 

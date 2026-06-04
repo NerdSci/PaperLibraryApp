@@ -328,6 +328,32 @@ def list_papers():
     return jsonify(papers)
 
 
+@app.route("/api/papers/<int:paper_id>", methods=["DELETE"])
+def delete_paper(paper_id):
+    """Remove a paper from the library, including tags, highlights, and its PDF file."""
+    db = get_db()
+    paper = db.execute(
+        "SELECT id, pdf_path FROM papers WHERE id = ?", (paper_id,)
+    ).fetchone()
+    if paper is None:
+        return jsonify({"error": "Paper not found."}), 404
+
+    db.execute("DELETE FROM paper_tags WHERE paper_id = ?", (paper_id,))
+    db.execute("DELETE FROM highlights WHERE paper_id = ?", (paper_id,))
+    db.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
+    db.commit()
+
+    if paper["pdf_path"]:
+        pdf_path = Path(paper["pdf_path"])
+        if pdf_path.is_file():
+            try:
+                pdf_path.unlink()
+            except OSError:
+                pass
+
+    return jsonify({"success": True})
+
+
 @app.route("/api/tags", methods=["GET"])
 def get_tags():
     """Return the tag list."""

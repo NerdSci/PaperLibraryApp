@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Viewer - {{ paper.title }}</title>
+  {% include 'includes/fonts.html' %}
   <link rel="stylesheet" href="/static/style.css" />
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/web/pdf_viewer.css" />
 </head>
@@ -11,28 +12,55 @@
   <div class="viewer-shell">
     <header class="viewer-header">
       <div>
-        <p class="meta-label">Viewing</p>
+        <p class="meta-label">
+          <span class="material-symbols-outlined meta-label__icon" aria-hidden="true">menu_book</span>
+          Viewing
+        </p>
         <h1>{{ paper.title }}</h1>
         <p class="meta-text">{{ paper.authors }} · {{ paper.year }} · [{{ paper.category }}]</p>
       </div>
       <div class="viewer-actions">
-        <a class="secondary-button" href="/">← Back to library</a>
+        <a class="secondary-button btn-with-icon" href="/">
+          <span class="material-symbols-outlined btn-icon" aria-hidden="true">arrow_back</span>
+          <span class="btn-label">Back to library</span>
+        </a>
       </div>
     </header>
 
     <section class="viewer-controls">
-      <button id="prev-page" class="secondary-button" type="button">Previous</button>
-      <span id="page-info">Page 1</span>
-      <button id="next-page" class="secondary-button" type="button">Next</button>
-      <button id="save-highlight" class="primary-button" type="button">Save Highlight</button>
+      <button id="prev-page" class="secondary-button btn-with-icon" type="button">
+        <span class="material-symbols-outlined btn-icon" aria-hidden="true">chevron_left</span>
+        <span class="btn-label">Previous</span>
+      </button>
+      <span id="page-info" class="page-info">
+        <span class="material-symbols-outlined page-info__icon" aria-hidden="true">description</span>
+        Page 1
+      </span>
+      <button id="next-page" class="secondary-button btn-with-icon" type="button">
+        <span class="btn-label">Next</span>
+        <span class="material-symbols-outlined btn-icon" aria-hidden="true">chevron_right</span>
+      </button>
+      <button id="save-highlight" class="primary-button btn-with-icon" type="button">
+        <span class="material-symbols-outlined btn-icon" aria-hidden="true">highlight</span>
+        <span class="btn-label">Save Highlight</span>
+      </button>
       <div id="highlight-color-picker" class="highlight-color-picker" aria-label="Highlight colour"></div>
-      <button id="toggle-highlight-manage" class="secondary-button" type="button">Manage highlights</button>
+      <button id="toggle-highlight-manage" class="secondary-button btn-with-icon" type="button">
+        <span class="material-symbols-outlined btn-icon" aria-hidden="true">checklist</span>
+        <span class="btn-label">Manage highlights</span>
+      </button>
       <span id="status-message" class="status"></span>
-      <span class="hint">Select text, pick a colour, then save. Use Manage highlights to delete.</span>
+      <span class="hint">
+        <span class="material-symbols-outlined hint__icon" aria-hidden="true">touch_app</span>
+        Select text, pick a colour, then save. Use Manage highlights to delete.
+      </span>
     </section>
 
     <div id="highlight-list-panel" class="highlight-list-panel hidden">
-      <h3>Highlights on this page</h3>
+      <h3 class="section-heading">
+        <span class="material-symbols-outlined" aria-hidden="true">format_ink_highlighter</span>
+        Highlights on this page
+      </h3>
       <ul id="highlight-list" class="highlight-list"></ul>
     </div>
 

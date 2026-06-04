@@ -4,21 +4,41 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Paper Library App</title>
+  {% include 'includes/fonts.html' %}
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
   <div id="drop-overlay" class="drop-overlay hidden" aria-hidden="true">
-    <p>Drop PDF to import</p>
+    <p class="drop-overlay__message">
+      <span class="material-symbols-outlined" aria-hidden="true">upload_file</span>
+      Drop PDF to import
+    </p>
   </div>
 
   <div class="app-shell">
     <aside class="sidebar">
-      <h1>Tags</h1>
+      <div class="sidebar-brand">
+        <span class="material-symbols-outlined sidebar-brand__icon" aria-hidden="true">auto_stories</span>
+        <span class="sidebar-brand__name">Paper Library</span>
+      </div>
+      <h2 class="sidebar-section-title">
+        <span class="material-symbols-outlined" aria-hidden="true">sell</span>
+        Tags
+      </h2>
       <div id="tag-list" class="tag-list"></div>
-      <button id="clear-filter" class="secondary-button">Show all</button>
+      <button id="clear-filter" class="secondary-button btn-with-icon" type="button">
+        <span class="material-symbols-outlined btn-icon" aria-hidden="true">filter_alt_off</span>
+        <span class="btn-label">Show all</span>
+      </button>
       <div class="section">
-        <h2>Hugging Face</h2>
-        <button id="open-hf-search" class="primary-button">Search HF papers</button>
+        <h2 class="sidebar-section-title">
+          <span class="material-symbols-outlined" aria-hidden="true">travel_explore</span>
+          Hugging Face
+        </h2>
+        <button id="open-hf-search" class="primary-button btn-with-icon" type="button">
+          <span class="material-symbols-outlined btn-icon" aria-hidden="true">search</span>
+          <span class="btn-label">Search HF papers</span>
+        </button>
       </div>
     </aside>
 
@@ -26,11 +46,12 @@
       <section class="top-bar">
         <div class="search-row">
           <div class="search-input-wrap">
-            <input id="search-input" type="search" placeholder="Search library" autocomplete="off" />
+            <label class="search-field">
+              <span class="material-symbols-outlined search-field__icon" aria-hidden="true">search</span>
+              <input id="search-input" type="search" placeholder="Search library" autocomplete="off" />
+            </label>
             <button type="button" id="search-filter-toggle" class="filter-button" aria-label="Filter library" title="Filters">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <path d="M4 6h16M7 12h10M10 18h4"/>
-              </svg>
+              <span class="material-symbols-outlined" aria-hidden="true">tune</span>
             </button>
           </div>
           <div id="search-filter-panel" class="search-filter-panel hidden">
@@ -45,19 +66,26 @@
             </label>
             <button type="button" id="filter-clear-all" class="secondary-button">Clear all filters</button>
           </div>
-          <span class="hint">Press / to search</span>
+          <span class="hint">
+            <span class="material-symbols-outlined hint__icon" aria-hidden="true">keyboard</span>
+            Press / to search
+          </span>
         </div>
         <div class="status" id="status-message"></div>
       </section>
 
       <section id="drop-zone" class="drop-zone">
+        <span class="material-symbols-outlined drop-zone__icon" aria-hidden="true">cloud_upload</span>
         <strong>Drag a PDF anywhere on this page to import.</strong>
         <span>We detect the arXiv ID from file content, not the filename.</span>
       </section>
 
       <section class="library-section">
         <div class="library-header">
-          <h2>Library</h2>
+          <h2 class="section-heading">
+            <span class="material-symbols-outlined" aria-hidden="true">collections_bookmark</span>
+            Library
+          </h2>
           <label class="select-all-label">
             <input type="checkbox" id="select-all-papers" />
             Select all on page
@@ -65,8 +93,14 @@
         </div>
         <div id="bulk-action-bar" class="bulk-action-bar hidden">
           <span id="bulk-selection-count">0 selected</span>
-          <button type="button" id="bulk-apply-tags" class="secondary-button">Apply tags</button>
-          <button type="button" id="bulk-clear-selection" class="secondary-button">Clear selection</button>
+          <button type="button" id="bulk-apply-tags" class="secondary-button btn-with-icon">
+            <span class="material-symbols-outlined btn-icon" aria-hidden="true">label</span>
+            <span class="btn-label">Apply tags</span>
+          </button>
+          <button type="button" id="bulk-clear-selection" class="secondary-button btn-with-icon">
+            <span class="material-symbols-outlined btn-icon" aria-hidden="true">deselect</span>
+            <span class="btn-label">Clear selection</span>
+          </button>
         </div>
         <div id="library-list" class="library-list"></div>
       </section>
@@ -81,12 +115,23 @@
   <div id="hf-modal" class="modal hidden">
     <div class="modal-content">
       <div class="modal-header">
-        <h2>Hugging Face Paper Search</h2>
-        <button id="close-hf-modal" class="icon-button" type="button" aria-label="Close">×</button>
+        <h2 class="modal-title">
+          <span class="material-symbols-outlined" aria-hidden="true">travel_explore</span>
+          Hugging Face Paper Search
+        </h2>
+        <button id="close-hf-modal" class="icon-button" type="button" aria-label="Close">
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
+        </button>
       </div>
       <div class="modal-body">
-        <input id="hf-search-input" type="search" placeholder="Search Hugging Face papers" />
-        <button id="hf-search-button" class="primary-button" type="button">Search</button>
+        <label class="search-field search-field--modal">
+          <span class="material-symbols-outlined search-field__icon" aria-hidden="true">search</span>
+          <input id="hf-search-input" type="search" placeholder="Search Hugging Face papers" />
+        </label>
+        <button id="hf-search-button" class="primary-button btn-with-icon" type="button">
+          <span class="material-symbols-outlined btn-icon" aria-hidden="true">search</span>
+          <span class="btn-label">Search</span>
+        </button>
         <div id="hf-results" class="hf-results"></div>
       </div>
     </div>
