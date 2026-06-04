@@ -143,14 +143,295 @@ const HIGHLIGHT_COLORS = [
     { label: "Purple", value: "rgba(196, 181, 253, 0.45)" },
 ]
 
+const UPLOAD_TIMEOUT_MS = 120000
+const UPLOAD_PROGRESS_WEIGHT = 45
+const PROCESS_PROGRESS_START = 45
+const PROCESS_PROGRESS_END = 92
+
+const IMPORT_STAGE_LABELS = {
+    uploading: "Uploading PDF…",
+    processing: "Extracting arXiv ID and fetching metadata…",
+    downloading: "Downloading PDF from arXiv…",
+    saving: "Saving to library…",
+    complete: "Import complete",
+}
+
+let importProgressCreepTimer = null
+let activeImportProgressRoot = null
+
+function stopImportProgressCreep() {
+    if (importProgressCreepTimer) {
+        clearInterval(importProgressCreepTimer)
+        importProgressCreepTimer = null
+    }
+}
+
+function getImportProgressParts(root) {
+    if (!root) return {}
+    return {
+        bar: root.querySelector(".import-progress__bar"),
+        percentEl: root.querySelector(".import-progress__percent"),
+        stageEl: root.querySelector(".import-progress__stage"),
+        track: root.querySelector(".import-progress__track"),
+    }
+}
+
+function updateImportProgressUI({ percent, stage, indeterminate = false }, root) {
+    const panel = root || activeImportProgressRoot || dom.$("#import-progress")
+    if (!panel) return
+
+    const { bar, percentEl, stageEl, track } = getImportProgressParts(panel)
+    const clamped = Math.min(100, Math.max(0, percent))
+
+    if (bar) {
+        bar.style.width = indeterminate ? "35%" : `${clamped}%`
+        bar.classList.toggle("import-progress__bar--indeterminate", indeterminate)
+    }
+    if (track) {
+        track.classList.toggle("import-progress__track--indeterminate", indeterminate)
+    }
+    if (percentEl) {
+        percentEl.textContent = indeterminate ? "…" : `${Math.round(clamped)}%`
+    }
+    if (stageEl && stage) {
+        stageEl.textContent = stage
+    }
+}
+
+function startImportProgressCreep(fromPercent, toPercent, stage, durationMs = 28000, root) {
+    stopImportProgressCreep()
+    const panel = root || activeImportProgressRoot
+    const start = Date.now()
+    importProgressCreepTimer = setInterval(() => {
+        const elapsed = Date.now() - start
+        const t = Math.min(1, elapsed / durationMs)
+        const eased = 1 - (1 - t) ** 1.6
+        updateImportProgressUI(
+            {
+                percent: fromPercent + (toPercent - fromPercent) * eased,
+                stage,
+                indeterminate: false,
+            },
+            panel
+        )
+        if (t >= 1) stopImportProgressCreep()
+    }, 160)
+}
+
+function createHfImportProgressElement() {
+    const el = document.createElement("div")
+    el.className = "import-progress import-progress--hf hidden"
+    el.setAttribute("aria-live", "polite")
+    el.setAttribute("aria-busy", "false")
+
+    const track = document.createElement("div")
+    track.className = "import-progress__track"
+    const bar = document.createElement("div")
+    bar.className = "import-progress__bar"
+    track.appendChild(bar)
+
+    const footer = document.createElement("div")
+    footer.className = "import-progress__footer"
+
+    const stage = document.createElement("span")
+    stage.className = "import-progress__stage"
+
+    const percent = document.createElement("span")
+    percent.className = "import-progress__percent"
+    percent.textContent = "0%"
+
+    footer.append(stage, percent)
+    el.append(track, footer)
+    return el
+}
+
+function showDropZoneImportProgress(fileLabel) {
+    stopImportProgressCreep()
+    const panel = dom.$("#import-progress")
+    const dropZone = dom.$("#drop-zone")
+    const idle = dom.$("#drop-zone-idle")
+    if (!panel) return
+
+    activeImportProgressRoot = panel
+    const filenameEl = panel.querySelector(".import-progress__filename")
+    if (filenameEl) filenameEl.textContent = fileLabel
+
+    idle?.classList.add("hidden")
+    panel.classList.remove("hidden")
+    panel.setAttribute("aria-busy", "true")
+    dropZone?.classList.add("drop-zone--importing")
+    updateImportProgressUI(
+        {
+            percent: 0,
+            stage: IMPORT_STAGE_LABELS.uploading,
+            indeterminate: false,
+        },
+        panel
+    )
+}
+
+function hideDropZoneImportProgress({ complete = false } = {}) {
+    stopImportProgressCreep()
+    const panel = dom.$("#import-progress")
+    const dropZone = dom.$("#drop-zone")
+    const idle = dom.$("#drop-zone-idle")
+    if (!panel) return
+
+    if (complete) {
+        updateImportProgressUI(
+            {
+                percent: 100,
+                stage: IMPORT_STAGE_LABELS.complete,
+                indeterminate: false,
+            },
+            panel
+        )
+    }
+
+    panel.setAttribute("aria-busy", "false")
+    dropZone?.classList.remove("drop-zone--importing")
+
+    const delay = complete ? 500 : 0
+    setTimeout(() => {
+        panel.classList.add("hidden")
+        idle?.classList.remove("hidden")
+        if (activeImportProgressRoot === panel) activeImportProgressRoot = null
+    }, delay)
+}
+
+function showHfImportProgress(progressEl) {
+    stopImportProgressCreep()
+    if (!progressEl) return
+    activeImportProgressRoot = progressEl
+    progressEl.classList.remove("hidden")
+    progressEl.setAttribute("aria-busy", "true")
+    updateImportProgressUI(
+        {
+            percent: 0,
+            stage: "Fetching metadata and downloading PDF…",
+            indeterminate: false,
+        },
+        progressEl
+    )
+}
+
+function hideHfImportProgress(progressEl, { complete = false } = {}) {
+    stopImportProgressCreep()
+    if (!progressEl) return
+
+    if (complete) {
+        updateImportProgressUI(
+            {
+                percent: 100,
+                stage: IMPORT_STAGE_LABELS.complete,
+                indeterminate: false,
+            },
+            progressEl
+        )
+    }
+
+    progressEl.setAttribute("aria-busy", "false")
+    const delay = complete ? 500 : 0
+    setTimeout(() => {
+        progressEl.classList.add("hidden")
+        if (activeImportProgressRoot === progressEl) activeImportProgressRoot = null
+    }, delay)
+}
+
+function uploadPdfWithProgress(file, { onProgress, onUploadComplete, timeoutMs } = {}) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        const form = new FormData()
+        form.append("pdf", file)
+
+        let timer = null
+        if (timeoutMs) {
+            timer = setTimeout(() => {
+                xhr.abort()
+            }, timeoutMs)
+        }
+
+        const finish = (fn) => {
+            if (timer) clearTimeout(timer)
+            fn()
+        }
+
+        xhr.upload.addEventListener("progress", (event) => {
+            if (!onProgress) return
+            if (event.lengthComputable && event.total > 0) {
+                onProgress({
+                    loaded: event.loaded,
+                    total: event.total,
+                    ratio: event.loaded / event.total,
+                })
+            } else {
+                onProgress({ indeterminate: true })
+            }
+        })
+
+        xhr.upload.addEventListener("load", () => {
+            onUploadComplete?.()
+        })
+
+        xhr.addEventListener("load", () => {
+            let data = {}
+            try {
+                data = JSON.parse(xhr.responseText || "{}")
+            } catch {
+                data = {}
+            }
+
+            if (xhr.status >= 200 && xhr.status < 300) {
+                finish(() => resolve(data))
+                return
+            }
+
+            const err = new Error(data.error || xhr.statusText || "Upload failed.")
+            err.duplicate = Boolean(data.duplicate)
+            finish(() => reject(err))
+        })
+
+        xhr.addEventListener("error", () => {
+            finish(() => reject(new Error("Upload failed.")))
+        })
+
+        xhr.addEventListener("abort", () => {
+            finish(() => reject(new Error("Upload timed out. Try again in a moment.")))
+        })
+
+        xhr.open("POST", "/api/add-paper")
+        xhr.send(form)
+    })
+}
+
 const api = {
     fetchJson: async (url, opts = {}) => {
-        const response = await fetch(url, opts)
-        const data = await response.json().catch(() => ({}))
-        if (!response.ok) {
-            throw new Error(data.error || response.statusText)
+        const { timeoutMs, ...fetchOpts } = opts
+        const controller = timeoutMs ? new AbortController() : null
+        const timer =
+            controller &&
+            setTimeout(() => controller.abort(), timeoutMs)
+
+        try {
+            const response = await fetch(url, {
+                ...fetchOpts,
+                signal: controller?.signal,
+            })
+            const data = await response.json().catch(() => ({}))
+            if (!response.ok) {
+                const err = new Error(data.error || response.statusText)
+                err.duplicate = Boolean(data.duplicate)
+                throw err
+            }
+            return data
+        } catch (error) {
+            if (error?.name === "AbortError") {
+                throw new Error("Upload timed out. Try again in a moment.")
+            }
+            throw error
+        } finally {
+            if (timer) clearTimeout(timer)
         }
-        return data
     },
 
     getPapers: async (query = "", tagId = null, source = null) => {
@@ -166,10 +447,20 @@ const api = {
 
     getTags: async () => api.fetchJson("/api/tags"),
 
-    uploadPdf: async (file) => {
-        const form = new FormData()
-        form.append("pdf", file)
-        return api.fetchJson("/api/add-paper", { method: "POST", body: form })
+    uploadPdf: async (file, callbacks = {}) => {
+        return uploadPdfWithProgress(file, {
+            timeoutMs: UPLOAD_TIMEOUT_MS,
+            ...callbacks,
+        })
+    },
+
+    hfImport: async (arxivId) => {
+        return api.fetchJson("/api/hf-import", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ arxiv_id: arxivId }),
+            timeoutMs: UPLOAD_TIMEOUT_MS,
+        })
     },
 
     savePaperTags: async (paperId, tagIds) => {
@@ -181,14 +472,6 @@ const api = {
     },
 
     hfSearch: async (query) => api.fetchJson(`/api/hf-search?q=${encodeURIComponent(query)}`),
-
-    hfImport: async (arxivId) => {
-        return api.fetchJson("/api/hf-import", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ arxiv_id: arxivId }),
-        })
-    },
 
     getHighlights: async (paperId) => api.fetchJson(`/api/highlights/${paperId}`),
 
@@ -434,22 +717,12 @@ async function renderTags(selectedTag) {
     const tags = await ensureTagsCached()
     const container = dom.$("#tag-list")
     container.innerHTML = ""
-    const allTag = document.createElement("button")
-    allTag.type = "button"
-    allTag.className = selectedTag ? "tag-chip" : "tag-chip active"
-    setButtonLabel(allTag, "grid_view", "All")
-    allTag.addEventListener("click", () => {
-        clearPaperSelection()
-        loadLibrary(dom.$("#search-input").value.trim(), null)
-    })
-    container.appendChild(allTag)
 
     tags.forEach((tag) => {
         const button = document.createElement("button")
         button.type = "button"
-        button.className = tag.id === selectedTag ? "tag-chip active" : "tag-chip"
-        button.style.borderColor = tag.color
-        button.innerHTML = `<span class="tag-dot" style="background-color: ${tag.color};"></span><span>${escapeHtml(tag.name)}</span>`
+        button.className = tag.id === selectedTag ? "tag-filter-item active" : "tag-filter-item"
+        button.innerHTML = `<span class="tag-dot" style="background-color: ${tag.color};"></span><span class="tag-filter-item__label">${escapeHtml(tag.name)}</span>`
         button.addEventListener("click", () => {
             clearPaperSelection()
             loadLibrary(dom.$("#search-input").value.trim(), tag.id)
@@ -502,6 +775,8 @@ async function renderLibrary(query = "", tagId = null, source = null) {
             card.classList.add("selected")
         }
 
+        const selectCol = document.createElement("div")
+        selectCol.className = "paper-select-col"
         const checkbox = document.createElement("input")
         checkbox.type = "checkbox"
         checkbox.className = "paper-checkbox"
@@ -516,6 +791,7 @@ async function renderLibrary(query = "", tagId = null, source = null) {
             }
             updateBulkBar()
         })
+        selectCol.appendChild(checkbox)
 
         const meta = document.createElement("div")
         meta.className = "paper-meta"
@@ -525,9 +801,29 @@ async function renderLibrary(query = "", tagId = null, source = null) {
         titleLink.href = `/viewer/${paper.id}`
         titleLink.textContent = paper.title
 
-        const info = document.createElement("div")
-        info.className = "paper-info"
-        info.textContent = `${paper.authors} · [${paper.category}] · ${paper.year} · ${paper.source}`
+        const authors = document.createElement("div")
+        authors.className = "paper-authors"
+        authors.textContent = paper.authors || "Unknown author"
+
+        const details = document.createElement("div")
+        details.className = "paper-details"
+
+        const sourceBadge = document.createElement("span")
+        sourceBadge.className = "paper-source-badge"
+        const categoryLabel = paper.category ? `[${paper.category}]` : ""
+        sourceBadge.textContent = `${paper.source || "arXiv"} ${categoryLabel}`.trim()
+
+        const yearSpan = document.createElement("span")
+        yearSpan.className = "paper-year"
+        yearSpan.textContent = paper.year ? String(paper.year) : "—"
+
+        const typeSpan = document.createElement("span")
+        typeSpan.className = "paper-type"
+        typeSpan.textContent = "Preprint"
+
+        details.appendChild(sourceBadge)
+        details.appendChild(yearSpan)
+        details.appendChild(typeSpan)
 
         const tagsRow = document.createElement("div")
         tagsRow.className = "paper-tags-row"
@@ -544,8 +840,8 @@ async function renderLibrary(query = "", tagId = null, source = null) {
 
         const editTagsBtn = document.createElement("button")
         editTagsBtn.type = "button"
-        editTagsBtn.className = "secondary-button edit-tags-button btn-with-icon"
-        setButtonLabel(editTagsBtn, "sell", "Edit tags")
+        editTagsBtn.className = "paper-inline-button edit-tags-button"
+        editTagsBtn.textContent = "Edit tags"
         editTagsBtn.addEventListener("click", (event) => {
             event.preventDefault()
             event.stopPropagation()
@@ -560,19 +856,34 @@ async function renderLibrary(query = "", tagId = null, source = null) {
         tagsRow.appendChild(editTagsBtn)
 
         meta.appendChild(titleLink)
-        meta.appendChild(info)
+        meta.appendChild(authors)
+        meta.appendChild(details)
         meta.appendChild(tagsRow)
 
         const actions = document.createElement("div")
         actions.className = "paper-actions"
-        const pdfLink = document.createElement("a")
-        pdfLink.className = "pdf-link btn-with-icon"
-        pdfLink.href = `/viewer/${paper.id}`
-        setLinkLabel(pdfLink, "picture_as_pdf", "PDF")
+
+        const menuBtn = document.createElement("button")
+        menuBtn.type = "button"
+        menuBtn.className = "paper-menu-button icon-button"
+        menuBtn.setAttribute("aria-label", "Paper actions")
+        menuBtn.appendChild(icon("more_horiz"))
+        menuBtn.addEventListener("click", (event) => {
+            event.stopPropagation()
+            const open = card.classList.toggle("paper-row--menu-open")
+            if (open) {
+                dom.$all(".paper-row--menu-open").forEach((row) => {
+                    if (row !== card) row.classList.remove("paper-row--menu-open")
+                })
+            }
+        })
+
+        const menu = document.createElement("div")
+        menu.className = "paper-row-menu"
         const deleteBtn = document.createElement("button")
         deleteBtn.type = "button"
-        deleteBtn.className = "secondary-button delete-paper-button btn-with-icon"
-        setButtonLabel(deleteBtn, "delete", "Delete")
+        deleteBtn.className = "paper-row-menu__item"
+        deleteBtn.textContent = "Delete from library"
         deleteBtn.addEventListener("click", async () => {
             const message =
                 `Remove "${paper.title}" from your library?\n\n` +
@@ -589,10 +900,18 @@ async function renderLibrary(query = "", tagId = null, source = null) {
                 deleteBtn.disabled = false
             }
         })
-        actions.appendChild(pdfLink)
-        actions.appendChild(deleteBtn)
+        menu.appendChild(deleteBtn)
 
-        card.appendChild(checkbox)
+        const pdfLink = document.createElement("a")
+        pdfLink.className = "pdf-link"
+        pdfLink.href = `/viewer/${paper.id}`
+        pdfLink.textContent = "PDF"
+
+        actions.appendChild(menuBtn)
+        actions.appendChild(menu)
+        actions.appendChild(pdfLink)
+
+        card.appendChild(selectCol)
         card.appendChild(meta)
         card.appendChild(actions)
         container.appendChild(card)
@@ -770,15 +1089,69 @@ async function handleFileUpload(file) {
         showStatus("Only PDF files are supported.", "error")
         return
     }
-    if (indexState.uploadInProgress) return
+    if (indexState.uploadInProgress) {
+        showStatus("Another upload is in progress. Please wait.", "warning")
+        return
+    }
     indexState.uploadInProgress = true
+    showDropZoneImportProgress(file.name)
+    const progressRoot = dom.$("#import-progress")
     try {
-        showStatus("Uploading PDF and looking up metadata…", "info")
-        await api.uploadPdf(file)
-        showStatus("Paper added successfully.", "success")
+        const result = await api.uploadPdf(file, {
+            onProgress: ({ ratio, indeterminate }) => {
+                if (indeterminate) {
+                    updateImportProgressUI(
+                        {
+                            percent: 12,
+                            stage: IMPORT_STAGE_LABELS.uploading,
+                            indeterminate: true,
+                        },
+                        progressRoot
+                    )
+                    return
+                }
+                updateImportProgressUI(
+                    {
+                        percent: ratio * UPLOAD_PROGRESS_WEIGHT,
+                        stage: IMPORT_STAGE_LABELS.uploading,
+                        indeterminate: false,
+                    },
+                    progressRoot
+                )
+            },
+            onUploadComplete: () => {
+                startImportProgressCreep(
+                    PROCESS_PROGRESS_START,
+                    PROCESS_PROGRESS_END,
+                    IMPORT_STAGE_LABELS.processing,
+                    28000,
+                    progressRoot
+                )
+            },
+        })
+        stopImportProgressCreep()
+        updateImportProgressUI(
+            {
+                percent: 96,
+                stage: IMPORT_STAGE_LABELS.saving,
+                indeterminate: false,
+            },
+            progressRoot
+        )
+        hideDropZoneImportProgress({ complete: true })
+        if (result.warning) {
+            showStatus(result.warning, "warning")
+        } else {
+            showStatus("Paper added successfully.", "success")
+        }
         loadLibrary(dom.$("#search-input").value.trim())
     } catch (error) {
-        showStatus(error.message || "Upload failed.", "error")
+        hideDropZoneImportProgress()
+        if (error.duplicate) {
+            showStatus("This file is already present in the library.", "warning")
+        } else {
+            showStatus(error.message || "Upload failed.", "error")
+        }
     } finally {
         indexState.uploadInProgress = false
     }
@@ -969,6 +1342,10 @@ async function doHfSearch(query, resultsContainer) {
         items.forEach((item) => {
             const card = document.createElement("article")
             card.className = "hf-result"
+
+            const body = document.createElement("div")
+            body.className = "hf-result-body"
+
             const title = document.createElement("div")
             title.className = "hf-result-title"
             title.textContent = item.title
@@ -982,14 +1359,20 @@ async function doHfSearch(query, resultsContainer) {
             meta.className = "hf-result-meta"
             meta.textContent = `arXiv ID: ${item.arxiv_id || "None"}`
 
-            card.appendChild(title)
-            card.appendChild(author)
-            card.appendChild(desc)
-            card.appendChild(meta)
+            body.appendChild(title)
+            body.appendChild(author)
+            body.appendChild(desc)
+            body.appendChild(meta)
+
+            const actions = document.createElement("div")
+            actions.className = "hf-result-actions"
 
             const importButton = document.createElement("button")
             importButton.type = "button"
             importButton.className = "primary-button btn-with-icon"
+
+            const importProgress = createHfImportProgressElement()
+
             const markImported = () => {
                 item.already_imported = true
                 card.classList.add("hf-result--imported")
@@ -1000,28 +1383,62 @@ async function doHfSearch(query, resultsContainer) {
                     const badgeText = document.createElement("span")
                     badgeText.textContent = "Already in library"
                     badge.appendChild(badgeText)
-                    card.insertBefore(badge, importButton)
+                    actions.insertBefore(badge, importButton)
                 }
                 importButton.disabled = true
                 setButtonLabel(importButton, "check_circle", "Imported")
+                hideHfImportProgress(importProgress)
             }
 
             importButton.addEventListener("click", async () => {
                 if (!item.arxiv_id || item.already_imported) return
                 importButton.disabled = true
                 setButtonLabel(importButton, "hourglass_empty", "Importing…")
+                showHfImportProgress(importProgress)
+                startImportProgressCreep(
+                    8,
+                    88,
+                    "Fetching metadata and downloading PDF…",
+                    50000,
+                    importProgress
+                )
                 try {
-                    await api.hfImport(item.arxiv_id)
+                    const result = await api.hfImport(item.arxiv_id)
+                    stopImportProgressCreep()
+                    updateImportProgressUI(
+                        {
+                            percent: 96,
+                            stage: IMPORT_STAGE_LABELS.saving,
+                            indeterminate: false,
+                        },
+                        importProgress
+                    )
+                    hideHfImportProgress(importProgress, { complete: true })
                     markImported()
-                    showStatus("Imported paper from Hugging Face.", "success")
+                    if (result.warning) {
+                        showStatus(result.warning, "warning")
+                    } else {
+                        showStatus("Imported paper from Hugging Face.", "success")
+                    }
                     loadLibrary(dom.$("#search-input").value.trim())
                 } catch (err) {
-                    showStatus(err.message || "Import failed.", "error")
-                    importButton.disabled = false
-                    setButtonLabel(importButton, "download", "Import")
+                    hideHfImportProgress(importProgress)
+                    if (err.duplicate) {
+                        markImported()
+                        showStatus("This file is already present in the library.", "warning")
+                    } else {
+                        showStatus(err.message || "Import failed.", "error")
+                        importButton.disabled = false
+                        setButtonLabel(importButton, "download", "Import")
+                    }
                 }
             })
-            card.appendChild(importButton)
+
+            actions.appendChild(importButton)
+            actions.appendChild(importProgress)
+
+            card.appendChild(body)
+            card.appendChild(actions)
 
             if (item.already_imported) {
                 markImported()
@@ -1071,6 +1488,14 @@ async function initIndexPage() {
         loadLibrary()
     })
 
+    document.addEventListener("click", (event) => {
+        if (!event.target.closest(".paper-menu-button, .paper-row-menu")) {
+            dom.$all(".paper-row--menu-open").forEach((row) =>
+                row.classList.remove("paper-row--menu-open")
+            )
+        }
+    })
+
     loadLibrary()
 }
 
@@ -1110,8 +1535,6 @@ async function initViewerPage() {
     const saveButton = dom.$("#save-highlight")
     const colorPicker = dom.$("#highlight-color-picker")
     const manageToggle = dom.$("#toggle-highlight-manage")
-    const listPanel = dom.$("#highlight-list-panel")
-    const listEl = dom.$("#highlight-list")
 
     let pdfDoc = null
     let currentPage = 1
@@ -1163,36 +1586,11 @@ async function initViewerPage() {
         colorPicker.appendChild(swatch)
     })
 
-    const renderHighlightList = () => {
-        listEl.innerHTML = ""
-        const onPage = allHighlights.filter((h) => h.page_number === currentPage)
-        if (onPage.length === 0) {
-            listEl.innerHTML = "<li class='empty-state'>No highlights on this page.</li>"
-            return
-        }
-        onPage.forEach((highlight) => {
-            const li = document.createElement("li")
-            li.className = "highlight-list-item"
-            const snippet = document.createElement("span")
-            snippet.className = "snippet"
-            snippet.textContent = highlight.selected_text || "(no text captured)"
-            const del = document.createElement("button")
-            del.type = "button"
-            del.className = "secondary-button highlight-delete-btn btn-with-icon"
-            setButtonLabel(del, "delete", "Delete")
-            del.addEventListener("click", () => deleteHighlightById(highlight.id))
-            li.appendChild(snippet)
-            li.appendChild(del)
-            listEl.appendChild(li)
-        })
-    }
-
     const deleteHighlightById = async (highlightId) => {
         try {
             await api.deleteHighlight(highlightId)
             showStatus("Highlight removed.", "success")
             await loadHighlights()
-            renderHighlightList()
         } catch (error) {
             showStatus(error.message || "Could not delete highlight.", "error")
         }
@@ -1209,7 +1607,6 @@ async function initViewerPage() {
                 }),
             )
         })
-        if (!listPanel.classList.contains("hidden")) renderHighlightList()
     }
 
     const syncLayerDimensions = (viewport) => {
@@ -1333,7 +1730,6 @@ async function initViewerPage() {
             await api.saveHighlight(window.PAPER_ID, selectedBox)
             showStatus("Highlight saved.", "success")
             await loadHighlights()
-            renderHighlightList()
             window.getSelection().removeAllRanges()
             selectedBox = null
         } catch (error) {
@@ -1344,13 +1740,15 @@ async function initViewerPage() {
     manageToggle.addEventListener("click", () => {
         manageHighlightsMode = !manageHighlightsMode
         highlightLayer.classList.toggle("manage-mode", manageHighlightsMode)
-        listPanel.classList.toggle("hidden", !manageHighlightsMode)
         setButtonLabel(
             manageToggle,
             manageHighlightsMode ? "done" : "checklist",
             manageHighlightsMode ? "Done managing" : "Manage highlights"
         )
         loadHighlights()
+        if (manageHighlightsMode) {
+            showStatus("Click a highlight on the page to delete it.", "info")
+        }
     })
 
     const goToPrevPage = () => {

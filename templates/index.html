@@ -21,25 +21,20 @@
         <span class="material-symbols-outlined sidebar-brand__icon" aria-hidden="true">auto_stories</span>
         <span class="sidebar-brand__name">Paper Library</span>
       </div>
-      <h2 class="sidebar-section-title">
-        <span class="material-symbols-outlined" aria-hidden="true">sell</span>
-        Tags
-      </h2>
-      <div id="tag-list" class="tag-list"></div>
-      <button id="clear-filter" class="secondary-button btn-with-icon" type="button">
-        <span class="material-symbols-outlined btn-icon" aria-hidden="true">filter_alt_off</span>
-        <span class="btn-label">Show all</span>
-      </button>
-      <div class="section">
-        <h2 class="sidebar-section-title">
-          <span class="material-symbols-outlined" aria-hidden="true">travel_explore</span>
-          Hugging Face
-        </h2>
-        <button id="open-hf-search" class="primary-button btn-with-icon" type="button">
-          <span class="material-symbols-outlined btn-icon" aria-hidden="true">search</span>
+
+      <section class="sidebar-block">
+        <p class="sidebar-label">Tags</p>
+        <div id="tag-list" class="tag-list"></div>
+        <button id="clear-filter" class="sidebar-link-button" type="button">Show all papers</button>
+      </section>
+
+      <section class="sidebar-block sidebar-block--spaced">
+        <p class="sidebar-label">Discover</p>
+        <button id="open-hf-search" class="sidebar-action-button btn-with-icon" type="button">
+          <span class="material-symbols-outlined btn-icon" aria-hidden="true">travel_explore</span>
           <span class="btn-label">Search HF papers</span>
         </button>
-      </div>
+      </section>
     </aside>
 
     <main class="content">
@@ -75,9 +70,26 @@
       </section>
 
       <section id="drop-zone" class="drop-zone">
-        <span class="material-symbols-outlined drop-zone__icon" aria-hidden="true">cloud_upload</span>
-        <strong>Drag a PDF anywhere on this page to import.</strong>
-        <span>We detect the arXiv ID from file content, not the filename.</span>
+        <div id="drop-zone-idle" class="drop-zone__idle">
+          <span class="material-symbols-outlined drop-zone__icon" aria-hidden="true">cloud_upload</span>
+          <strong>Drag a PDF anywhere on this page to import.</strong>
+          <span>We detect the arXiv ID from file content, not the filename.</span>
+        </div>
+
+        <div id="import-progress" class="import-progress hidden" aria-live="polite" aria-busy="false">
+          <div class="import-progress__heading">
+            <span class="material-symbols-outlined import-progress__icon" aria-hidden="true">hourglass_top</span>
+            <div class="import-progress__meta">
+              <p class="import-progress__title">Importing paper</p>
+              <p id="import-progress-filename" class="import-progress__filename"></p>
+            </div>
+            <span id="import-progress-percent" class="import-progress__percent">0%</span>
+          </div>
+          <div class="import-progress__track">
+            <div id="import-progress-bar" class="import-progress__bar"></div>
+          </div>
+          <p id="import-progress-stage" class="import-progress__stage"></p>
+        </div>
       </section>
 
       <section class="library-section">

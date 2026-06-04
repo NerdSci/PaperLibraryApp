@@ -34,6 +34,7 @@ def get_db():
     if "db" not in g:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         g.db = conn
     return g.db
 
@@ -139,6 +140,19 @@ def init_db():
     db.commit()
     ensure_default_tags()
     ensure_highlight_schema()
+    cleanup_orphaned_records()
+
+
+def cleanup_orphaned_records():
+    """Remove tag/highlight rows left behind when papers were replaced before FK enforcement."""
+    db = get_db()
+    db.execute(
+        "DELETE FROM highlights WHERE paper_id NOT IN (SELECT id FROM papers)"
+    )
+    db.execute(
+        "DELETE FROM paper_tags WHERE paper_id NOT IN (SELECT id FROM papers)"
+    )
+    db.commit()
 
 
 def ensure_highlight_schema():
@@ -214,7 +228,7 @@ def parse_arxiv_id_from_pdf(file_path):
     return None
 
 
-def fetch_arxiv_metadata(arxiv_id):
+def fetch_arxiv_metadata(arxiv_id, retries=5, backoff=2.0):
     """Fetch metadata from the arXiv API for a given arXiv identifier."""
     canonical_id = normalize_arxiv_id(arxiv_id)
     if not canonical_id:
@@ -227,7 +241,7 @@ def fetch_arxiv_metadata(arxiv_id):
     last_error = None
     for url in urls:
         try:
-            response = fetch_url_with_retries(url, timeout=20, retries=5, backoff=2.0)
+            response = fetch_url_with_retries(url, timeout=15, retries=retries, backoff=backoff)
             root = ET.fromstring(response.text)
             entry = root.find("{http://www.w3.org/2005/Atom}entry")
             if entry is None:
@@ -271,6 +285,91 @@ def save_pdf_and_metadata(file_storage, metadata):
     else:
         file_storage.replace(destination)
     return str(destination)
+
+
+def get_paper_by_arxiv_id(arxiv_id):
+    """Return an existing paper row for a canonical arXiv ID, or None."""
+    canonical_id = normalize_arxiv_id(arxiv_id)
+    if not canonical_id:
+        return None
+    return get_db().execute(
+        "SELECT * FROM papers WHERE arxiv_id = ?", (canonical_id,)
+    ).fetchone()
+
+
+def extract_pdf_text_for_search(pdf_path, max_pages=25):
+    """Extract text from the first pages of a PDF for library search (bounded work)."""
+    try:
+        reader = PdfReader(str(pdf_path))
+    except Exception:
+        return ""
+    chunks = []
+    for page in reader.pages[:max_pages]:
+        try:
+            chunks.append(page.extract_text() or "")
+        except Exception:
+            continue
+    return "\n".join(chunks)
+
+
+def fallback_metadata_from_arxiv_id(arxiv_id):
+    """Minimal metadata when arXiv API is unavailable (e.g. rate limited)."""
+    canonical_id = normalize_arxiv_id(arxiv_id)
+    return {
+        "arxiv_id": canonical_id,
+        "title": f"arXiv:{canonical_id}",
+        "authors": "Unknown",
+        "year": None,
+        "category": "unknown",
+        "source": "arXiv",
+        "summary": "",
+    }
+
+
+def fetch_arxiv_metadata_with_fallback(arxiv_id):
+    """Fetch arXiv metadata; on failure return minimal metadata so import can continue."""
+    try:
+        metadata = fetch_arxiv_metadata(arxiv_id, retries=2, backoff=1.0)
+        if metadata is not None:
+            return metadata, False
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 429:
+            return fallback_metadata_from_arxiv_id(arxiv_id), True
+        raise
+    except requests.RequestException:
+        return fallback_metadata_from_arxiv_id(arxiv_id), True
+    return fallback_metadata_from_arxiv_id(arxiv_id), True
+
+
+def insert_paper_record(metadata, pdf_path, source, extracted_text=""):
+    """Insert a new paper; raises ValueError if the arXiv ID already exists."""
+    canonical_id = normalize_arxiv_id(metadata["arxiv_id"])
+    if get_paper_by_arxiv_id(canonical_id):
+        raise ValueError("duplicate")
+
+    db = get_db()
+    db.execute(
+        """
+        INSERT INTO papers (
+            arxiv_id, title, authors, year, category, source,
+            extracted_text, pdf_path, date_added
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            canonical_id,
+            metadata["title"],
+            metadata["authors"],
+            metadata.get("year"),
+            metadata.get("category"),
+            source,
+            extracted_text,
+            pdf_path,
+            datetime.datetime.utcnow().isoformat(),
+        ),
+    )
+    db.commit()
+    row = db.execute("SELECT * FROM papers WHERE arxiv_id = ?", (canonical_id,)).fetchone()
+    return row_to_dict(row)
 
 
 with app.app_context():
@@ -344,8 +443,8 @@ def delete_paper(paper_id):
     if paper is None:
         return jsonify({"error": "Paper not found."}), 404
 
-    db.execute("DELETE FROM paper_tags WHERE paper_id = ?", (paper_id,))
     db.execute("DELETE FROM highlights WHERE paper_id = ?", (paper_id,))
+    db.execute("DELETE FROM paper_tags WHERE paper_id = ?", (paper_id,))
     db.execute("DELETE FROM papers WHERE id = ?", (paper_id,))
     db.commit()
 
@@ -385,41 +484,37 @@ def add_paper():
         temp_path.unlink(missing_ok=True)
         return jsonify({"error": "Could not find an arXiv ID inside the PDF."}), 400
 
+    canonical_id = normalize_arxiv_id(arxiv_id)
+    if get_paper_by_arxiv_id(canonical_id):
+        temp_path.unlink(missing_ok=True)
+        return jsonify(
+            {"error": "This file is already present in the library.", "duplicate": True}
+        ), 409
+
     try:
-        metadata = fetch_arxiv_metadata(arxiv_id)
+        metadata, rate_limited = fetch_arxiv_metadata_with_fallback(arxiv_id)
     except Exception as exc:
         temp_path.unlink(missing_ok=True)
         return jsonify({"error": f"Failed to fetch arXiv metadata: {exc}"}), 500
 
-    if metadata is None:
-        temp_path.unlink(missing_ok=True)
-        return jsonify({"error": "arXiv metadata not found for the detected ID."}), 404
-
     pdf_path = save_pdf_and_metadata(temp_path, metadata)
-    extracted_text = ""
-    try:
-        reader = PdfReader(pdf_path)
-        extracted_text = "\n".join((page.extract_text() or "") for page in reader.pages)
-    except Exception:
-        extracted_text = ""
+    extracted_text = extract_pdf_text_for_search(pdf_path)
 
-    db = get_db()
-    db.execute(
-        "INSERT OR REPLACE INTO papers (arxiv_id, title, authors, year, category, source, extracted_text, pdf_path, date_added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            metadata["arxiv_id"],
-            metadata["title"],
-            metadata["authors"],
-            metadata["year"],
-            metadata["category"],
-            metadata["source"],
-            extracted_text,
-            pdf_path,
-            datetime.datetime.utcnow().isoformat(),
-        ),
-    )
-    db.commit()
-    return jsonify({"success": True, "paper": metadata})
+    try:
+        paper = insert_paper_record(metadata, pdf_path, metadata["source"], extracted_text)
+    except ValueError:
+        Path(pdf_path).unlink(missing_ok=True)
+        return jsonify(
+            {"error": "This file is already present in the library.", "duplicate": True}
+        ), 409
+
+    response = {"success": True, "paper": paper}
+    if rate_limited:
+        response["warning"] = (
+            "arXiv is rate-limiting requests; saved with basic metadata. "
+            "You can re-import later for full details."
+        )
+    return jsonify(response)
 
 
 @app.route("/api/update-paper-tags", methods=["POST"])
@@ -627,15 +722,15 @@ def hf_import():
     if not arxiv_id:
         return jsonify({"error": "arxiv_id is required for import."}), 400
 
+    if get_paper_by_arxiv_id(arxiv_id):
+        return jsonify(
+            {"error": "This file is already present in the library.", "duplicate": True}
+        ), 409
+
     try:
-        metadata = fetch_arxiv_metadata(arxiv_id)
-    except requests.HTTPError as exc:
-        return arxiv_http_error_response(exc)
+        metadata, rate_limited = fetch_arxiv_metadata_with_fallback(arxiv_id)
     except requests.RequestException as exc:
         return jsonify({"error": f"Failed to fetch arXiv metadata: {exc}"}), 502
-
-    if metadata is None:
-        return jsonify({"error": "arXiv metadata not found for that ID."}), 404
 
     pdf_url = f"https://arxiv.org/pdf/{metadata['arxiv_id']}.pdf"
     try:
@@ -647,30 +742,23 @@ def hf_import():
 
     pdf_path = PDF_DIR / f"{metadata['arxiv_id']}.pdf"
     pdf_path.write_bytes(pdf_response.content)
-    extracted_text = ""
-    try:
-        reader = PdfReader(str(pdf_path))
-        extracted_text = "\n".join((page.extract_text() or "") for page in reader.pages)
-    except Exception:
-        extracted_text = ""
+    extracted_text = extract_pdf_text_for_search(pdf_path)
 
-    db = get_db()
-    db.execute(
-        "INSERT OR REPLACE INTO papers (arxiv_id, title, authors, year, category, source, extracted_text, pdf_path, date_added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (
-            metadata["arxiv_id"],
-            metadata["title"],
-            metadata["authors"],
-            metadata["year"],
-            metadata["category"],
-            "HuggingFace",
-            extracted_text,
-            str(pdf_path),
-            datetime.datetime.utcnow().isoformat(),
-        ),
-    )
-    db.commit()
-    return jsonify({"success": True, "paper": metadata})
+    try:
+        paper = insert_paper_record(metadata, str(pdf_path), "HuggingFace", extracted_text)
+    except ValueError:
+        pdf_path.unlink(missing_ok=True)
+        return jsonify(
+            {"error": "This file is already present in the library.", "duplicate": True}
+        ), 409
+
+    response = {"success": True, "paper": paper}
+    if rate_limited:
+        response["warning"] = (
+            "arXiv is rate-limiting requests; saved with basic metadata. "
+            "You can re-import later for full details."
+        )
+    return jsonify(response)
 
 
 if __name__ == "__main__":
