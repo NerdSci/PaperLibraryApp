@@ -312,35 +312,6 @@ def extract_pdf_text_for_search(pdf_path, max_pages=25):
     return "\n".join(chunks)
 
 
-def fallback_metadata_from_arxiv_id(arxiv_id):
-    """Minimal metadata when arXiv API is unavailable (e.g. rate limited)."""
-    canonical_id = normalize_arxiv_id(arxiv_id)
-    return {
-        "arxiv_id": canonical_id,
-        "title": f"arXiv:{canonical_id}",
-        "authors": "Unknown",
-        "year": None,
-        "category": "unknown",
-        "source": "arXiv",
-        "summary": "",
-    }
-
-
-def fetch_arxiv_metadata_with_fallback(arxiv_id):
-    """Fetch arXiv metadata; on failure return minimal metadata so import can continue."""
-    try:
-        metadata = fetch_arxiv_metadata(arxiv_id, retries=2, backoff=1.0)
-        if metadata is not None:
-            return metadata, False
-    except requests.HTTPError as exc:
-        if exc.response is not None and exc.response.status_code == 429:
-            return fallback_metadata_from_arxiv_id(arxiv_id), True
-        raise
-    except requests.RequestException:
-        return fallback_metadata_from_arxiv_id(arxiv_id), True
-    return fallback_metadata_from_arxiv_id(arxiv_id), True
-
-
 def insert_paper_record(metadata, pdf_path, source, extracted_text=""):
     """Insert a new paper; raises ValueError if the arXiv ID already exists."""
     canonical_id = normalize_arxiv_id(metadata["arxiv_id"])
@@ -492,10 +463,17 @@ def add_paper():
         ), 409
 
     try:
-        metadata, rate_limited = fetch_arxiv_metadata_with_fallback(arxiv_id)
-    except Exception as exc:
+        metadata = fetch_arxiv_metadata(arxiv_id)
+    except requests.HTTPError as exc:
         temp_path.unlink(missing_ok=True)
-        return jsonify({"error": f"Failed to fetch arXiv metadata: {exc}"}), 500
+        return arxiv_http_error_response(exc)
+    except requests.RequestException as exc:
+        temp_path.unlink(missing_ok=True)
+        return jsonify({"error": f"Failed to fetch arXiv metadata: {exc}"}), 502
+
+    if metadata is None:
+        temp_path.unlink(missing_ok=True)
+        return jsonify({"error": "arXiv metadata not found for the detected ID."}), 404
 
     pdf_path = save_pdf_and_metadata(temp_path, metadata)
     extracted_text = extract_pdf_text_for_search(pdf_path)
@@ -508,13 +486,7 @@ def add_paper():
             {"error": "This file is already present in the library.", "duplicate": True}
         ), 409
 
-    response = {"success": True, "paper": paper}
-    if rate_limited:
-        response["warning"] = (
-            "arXiv is rate-limiting requests; saved with basic metadata. "
-            "You can re-import later for full details."
-        )
-    return jsonify(response)
+    return jsonify({"success": True, "paper": paper})
 
 
 @app.route("/api/update-paper-tags", methods=["POST"])
@@ -728,9 +700,14 @@ def hf_import():
         ), 409
 
     try:
-        metadata, rate_limited = fetch_arxiv_metadata_with_fallback(arxiv_id)
+        metadata = fetch_arxiv_metadata(arxiv_id)
+    except requests.HTTPError as exc:
+        return arxiv_http_error_response(exc)
     except requests.RequestException as exc:
         return jsonify({"error": f"Failed to fetch arXiv metadata: {exc}"}), 502
+
+    if metadata is None:
+        return jsonify({"error": "arXiv metadata not found for that ID."}), 404
 
     pdf_url = f"https://arxiv.org/pdf/{metadata['arxiv_id']}.pdf"
     try:
@@ -752,13 +729,7 @@ def hf_import():
             {"error": "This file is already present in the library.", "duplicate": True}
         ), 409
 
-    response = {"success": True, "paper": paper}
-    if rate_limited:
-        response["warning"] = (
-            "arXiv is rate-limiting requests; saved with basic metadata. "
-            "You can re-import later for full details."
-        )
-    return jsonify(response)
+    return jsonify({"success": True, "paper": paper})
 
 
 if __name__ == "__main__":

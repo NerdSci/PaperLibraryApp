@@ -1139,11 +1139,7 @@ async function handleFileUpload(file) {
             progressRoot
         )
         hideDropZoneImportProgress({ complete: true })
-        if (result.warning) {
-            showStatus(result.warning, "warning")
-        } else {
-            showStatus("Paper added successfully.", "success")
-        }
+        showStatus("Paper added successfully.", "success")
         loadLibrary(dom.$("#search-input").value.trim())
     } catch (error) {
         hideDropZoneImportProgress()
@@ -1415,11 +1411,7 @@ async function doHfSearch(query, resultsContainer) {
                     )
                     hideHfImportProgress(importProgress, { complete: true })
                     markImported()
-                    if (result.warning) {
-                        showStatus(result.warning, "warning")
-                    } else {
-                        showStatus("Imported paper from Hugging Face.", "success")
-                    }
+                    showStatus("Imported paper from Hugging Face.", "success")
                     loadLibrary(dom.$("#search-input").value.trim())
                 } catch (err) {
                     hideHfImportProgress(importProgress)
