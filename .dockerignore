@@ -1,0 +1,12 @@
+.venv
+__pycache__
+*.py[cod]
+.git
+.gitignore
+.vscode
+data/*
+ui_guide
+docs
+*.md
+.env
+.env.*
